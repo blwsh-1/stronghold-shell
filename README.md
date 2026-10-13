@@ -59,6 +59,17 @@ MainActivity：轮询 /healthz 健康后 WebView 加载 index.html
 3. `gradle-wrapper.jar` / `gradlew` 未提交时，workflow 会用 runner 全局
    `gradle wrapper --gradle-version 8.7` 现场生成。
 4. Gradle 8.7 + AGP 8.5.2 需 JDK 17（workflow 已配 temurin 17）。
+5. **必须打包 `libc++_shared.so`**（关键！）：`libnode.so` 依赖 C++ 运行时
+   `libc++_shared.so`。若 APK 里只有 `libnode.so` 而没有它，运行时会报
+   `dlopen failed: library "libc++_shared.so" not found`，Node 起不来、WebView 一直白屏。
+   - nodejs-mobile 的 release 包里**不含**这个 .so（只有 libnode.so），
+     runner 的 NDK 里也常常找不到。
+   - 因此本仓库把 `prebuilt/arm64-v8a/libc++_shared.so`（约 6.7MB）**直接入库**，
+     `scripts/fetch_libnode.sh` 会优先从这里复制到 `jniLibs`。
+   - 可复用文件来源：任意 nodejs-mobile 安卓 App 的 `lib/arm64-v8a/libc++_shared.so`。
+6. **targetSdk 34 的 .so 需要页对齐**：不要用「手工往 zip 追加 .so」的方式改包
+   （会破坏对齐，安装时报 `INSTALL_FAILED_INVALID_APK: Failed to extract native libraries`）。
+   交给 Gradle/AGP 构建，它会自动做 16KB 对齐。
 
 ## 版本标记
 
