@@ -86,13 +86,9 @@ jobs:
           mkdir -p out
           cp app/build/outputs/apk/release/*.apk "out/${NAME}"
           ls -lh out/
-          # 同时切分片（每片 95MB），便于手机端逐片下载
-          cd out
-          split -b 95000000 -d "${NAME}" "${NAME}.part-"
-          ls -lh
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
           # 记录 SHA-256，写进 Release 说明
-          SHA=$(sha256sum "${NAME}" | cut -d' ' -f1)
+          SHA=$(sha256sum "out/${NAME}" | cut -d' ' -f1)
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
           echo "$NAME SHA-256: $SHA"
 
@@ -107,22 +103,20 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.version }}
-          name: 卫戍协议：盟约 v${{ steps.ver.outputs.version }} 安卓版（自建壳）
+          name: 卫戍协议：盟约 v${{ steps.ver.outputs.version }} 安卓版
           body: |
-            自建安卓壳构建产物，基于上游 `sganggs/Stronghold-Protocol` v${{ steps.ver.outputs.version }}。
+            《卫戍协议：盟约》安卓版（自建壳），基于上游 `sganggs/Stronghold-Protocol` v${{ steps.ver.outputs.version }}。
 
-            **安装包**
-            - `${{ steps.apk.outputs.name }}` — 完整安装包（约 850 MB）
-            - `${{ steps.apk.outputs.name }}.part-00 ... part-09` — 分片（按顺序 `cat` 合并即得完整 APK）
+            **安装**
+            - 下载下方的 `${{ steps.apk.outputs.name }}`（约 850 MB）
+            - 手机上安装（需允许「安装未知应用」）
+            - 要求 Android 7.0（API 24）及以上、arm64-v8a，磁盘留出 1 GB 以上
+            - 首次启动会解压游戏资源（几十秒），之后正常进入游戏
 
             **校验**
             - SHA-256: `${{ steps.apk.outputs.sha256 }}`
 
-            **安装**
-            - 要求 Android 7.0（API 24）+，arm64-v8a，磁盘留 1 GB 以上
-            - 首次启动会解压游戏资源，请耐心等待
-
             > 非官方同人作品，游戏素材版权归上海鹰角网络 / Yostar，仅供学习交流、严禁盈利。
-          files: out/*
+          files: out/*.apk
           draft: false
           prerelease: false
