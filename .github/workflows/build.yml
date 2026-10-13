@@ -1,9 +1,10 @@
 name: Build APK
 
 on:
-  push:
-    branches: [ main, master ]
-  workflow_dispatch:      # 支持手动触发
+  workflow_dispatch:      # 手动触发（避免每次推送都跑）
+
+permissions:
+  contents: write         # 允许创建 Release 并上传 asset
 
 jobs:
   build:
@@ -59,9 +60,32 @@ jobs:
       - name: 构建 Release APK
         run: ./gradlew :app:assembleRelease --stacktrace --no-daemon
 
-      - name: 上传 APK 产物
+      - name: 收集 APK
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/release/*.apk out/StrongholdShell-${{ github.run_number }}.apk
+          ls -lh out/
+          # 生成分片（每片 95MB），便于逐片下载
+          cd out
+          split -b 95000000 -d StrongholdShell-${{ github.run_number }}.apk part-
+          ls -lh
+
+      - name: 上传 APK 产物（备份）
         uses: actions/upload-artifact@v4
         with:
           name: stronghold-shell-apk
-          path: app/build/outputs/apk/release/*.apk
+          path: out/*.apk
           if-no-files-found: error
+
+      - name: 发布到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          body: |
+            自动构建产物（${{ github.run_number }}）
+            - StrongholdShell-${{ github.run_number }}.apk : 完整安装包
+            - part-* : 安装包分片（按顺序 cat 合并即得完整 apk）
+          files: out/*
+          draft: false
+          prerelease: false
