@@ -18,6 +18,7 @@ app/src/main/assets/bundle.sha256
 
 # ⚠️ 60MB 二进制：CI 里自动下载
 app/src/main/jniLibs/**/*.so
+# prebuilt 里的 libc++_shared.so（6.7MB）需要入库，不排除
 
 # 系统
 .DS_Store
