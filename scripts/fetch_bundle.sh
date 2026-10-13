@@ -40,7 +40,8 @@ fi
 
 echo "==> 打包 app_bundle.zip（store 模式）"
 ( cd "$TMP/root" && zip -q -r -X -0 "$OLDPWD/$BUNDLE" . )
-echo -n "$TAG-patched" > "$MARKER"
+VER="${TAG#v}"
+echo -n "${VER}-patched" > "$MARKER"
 
 rm -rf "$TMP"
 echo "==> 完成: $BUNDLE ($(du -h "$BUNDLE" | cut -f1))"
