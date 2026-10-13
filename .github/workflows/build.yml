@@ -1,10 +1,17 @@
 name: Build APK
 
 on:
-  workflow_dispatch:      # 手动触发（避免每次推送都跑）
+  workflow_dispatch:            # 手动触发
+    inputs:
+      version:                  # 可选：指定上游版本号（不填则自动查最新）
+        description: '上游版本号，如 0.2.5（留空=自动取最新）'
+        required: false
+        default: ''
+  push:
+    tags: ['v*']                # 打 v* 标签时自动构建
 
 permissions:
-  contents: write         # 允许创建 Release 并上传 asset
+  contents: write               # 允许创建 Release 并上传 asset
 
 jobs:
   build:
@@ -42,12 +49,23 @@ jobs:
 
       # 下载上游游戏包并打包成 app_bundle.zip 放 assets（可选）
       - name: 准备 app_bundle（若提供了下载脚本）
+        env:
+          SP_VERSION: ${{ github.event.inputs.version }}
         run: |
           if [ -f scripts/fetch_bundle.sh ]; then
             bash scripts/fetch_bundle.sh
           else
             echo "未提供 fetch_bundle.sh，跳过素材打包（产出的 APK 将不含游戏内容）"
           fi
+
+      - name: 读取上游版本号
+        id: ver
+        run: |
+          V=$(cat app/src/main/assets/bundle.sha256 2>/dev/null | sed 's/-patched$//' | tr -d '\n')
+          [ -n "$V" ] || V="${{ github.event.inputs.version }}"
+          [ -n "$V" ] || V="unknown"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "上游版本 = $V"
 
       - name: 生成 Gradle Wrapper（若缺失）
         run: |
@@ -60,32 +78,51 @@ jobs:
       - name: 构建 Release APK
         run: ./gradlew :app:assembleRelease --stacktrace --no-daemon
 
-      - name: 收集 APK
+      - name: 收集 APK 并正式命名
+        id: apk
         run: |
+          V="${{ steps.ver.outputs.version }}"
+          NAME="Stronghold-Protocol-v${V}-android.apk"
           mkdir -p out
-          cp app/build/outputs/apk/release/*.apk out/StrongholdShell-${{ github.run_number }}.apk
+          cp app/build/outputs/apk/release/*.apk "out/${NAME}"
           ls -lh out/
-          # 生成分片（每片 95MB），便于逐片下载
+          # 同时切分片（每片 95MB），便于手机端逐片下载
           cd out
-          split -b 95000000 -d StrongholdShell-${{ github.run_number }}.apk part-
+          split -b 95000000 -d "${NAME}" "${NAME}.part-"
           ls -lh
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          # 记录 SHA-256，写进 Release 说明
+          SHA=$(sha256sum "${NAME}" | cut -d' ' -f1)
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "$NAME SHA-256: $SHA"
 
       - name: 上传 APK 产物（备份）
         uses: actions/upload-artifact@v4
         with:
-          name: stronghold-shell-apk
+          name: stronghold-protocol-android-apk
           path: out/*.apk
           if-no-files-found: error
 
       - name: 发布到 Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
-          name: Build ${{ github.run_number }}
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: 卫戍协议：盟约 v${{ steps.ver.outputs.version }} 安卓版（自建壳）
           body: |
-            自动构建产物（${{ github.run_number }}）
-            - StrongholdShell-${{ github.run_number }}.apk : 完整安装包
-            - part-* : 安装包分片（按顺序 cat 合并即得完整 apk）
+            自建安卓壳构建产物，基于上游 `sganggs/Stronghold-Protocol` v${{ steps.ver.outputs.version }}。
+
+            **安装包**
+            - `${{ steps.apk.outputs.name }}` — 完整安装包（约 850 MB）
+            - `${{ steps.apk.outputs.name }}.part-00 ... part-09` — 分片（按顺序 `cat` 合并即得完整 APK）
+
+            **校验**
+            - SHA-256: `${{ steps.apk.outputs.sha256 }}`
+
+            **安装**
+            - 要求 Android 7.0（API 24）+，arm64-v8a，磁盘留 1 GB 以上
+            - 首次启动会解压游戏资源，请耐心等待
+
+            > 非官方同人作品，游戏素材版权归上海鹰角网络 / Yostar，仅供学习交流、严禁盈利。
           files: out/*
           draft: false
           prerelease: false
