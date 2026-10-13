@@ -56,6 +56,8 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.webkit:webkit:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // 显式声明 activity（registerForActivityResult / 文件选择器需要）
+    implementation("androidx.activity:activity-ktx:1.9.2")
 
     // ⭐ JNA：直接调用 libnode.so 的 node::Start（与现有壳同款做法）
     implementation("net.java.dev.jna:jna:5.14.0@aar")
