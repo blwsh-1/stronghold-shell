@@ -49,13 +49,17 @@ class NodeService : Service() {
 
     private fun startNode() {
         try {
-            val bundleDir = AssetHelper.bundleDir(this)
+            // ⭐ 启动器模式：优先用「用户导入的游戏包」(GamePack.activeDir)
+            //    没有导入包时才回退到 assets 内置 bundle（兼容旧流程）
+            val bundleDir: java.io.File =
+                if (GamePack.hasActivePack(this)) {
+                    GamePack.activeDir(this)
+                } else {
+                    AssetHelper.bundleDir(this)
+                }
             // ⭐ 上游是 Node.js 服务器，入口为 package.json 的 main：server/index.js
             //    （不是 main.js / index.js，那是旧壳的误写）
-            val candidates = listOf("server/index.js", "index.js", "main.js")
-            val entryName = candidates.firstOrNull {
-                java.io.File(bundleDir, it).exists()
-            } ?: "server/index.js"
+            val entryName = GamePack.findEntry(bundleDir) ?: "server/index.js"
             Log.i(TAG, "启动 Node，目录：${bundleDir.absolutePath} 入口：$entryName")
 
             // ⭐ JNA 直调 libnode.so 的 node::Start
