@@ -63,8 +63,11 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 1) 解压资源（首次或版本变化时）
-        AssetHelper.ensureAssetsExtracted(this)
+        // 1) 仅在「没有导入游戏包」时，才回退解压 assets 内置资源
+        //    （启动器模式：用户导入的包在 GamePack.activeDir，不需要这步）
+        if (!GamePack.hasActivePack(this)) {
+            AssetHelper.ensureAssetsExtracted(this)
+        }
         FileLogger.init(this)
 
         // 2) 创建 WebView
