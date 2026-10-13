@@ -62,7 +62,9 @@ jobs:
         id: ver
         run: |
           V=$(cat app/src/main/assets/bundle.sha256 2>/dev/null | sed 's/-patched$//' | tr -d '\n')
+          V="${V#v}"   # 去掉可能的 v 前缀，避免出现 vv0.2.5
           [ -n "$V" ] || V="${{ github.event.inputs.version }}"
+          V="${V#v}"
           [ -n "$V" ] || V="unknown"
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "上游版本 = $V"
