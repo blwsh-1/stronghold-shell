@@ -12,7 +12,7 @@
 app/src/main/java/com/stronghold/shell/
   MainActivity.kt     WebView + 启动流程 + 自愈
   NodeService.kt      前台服务：进程内启动 Node
-  VersionedNodeJs.kt  nodejs-mobile API 薄封装（反射，隔离版本差异）
+  NodeRunner.kt       JNA 直调 libnode.so 的封装
   AndroidBridge.kt    JS↔Kotlin 桥（注入名 AndroidNative）
   AssetHelper.kt      解压 assets/app_bundle.zip → 私有目录
   FileLogger.kt       落盘日志
@@ -49,13 +49,16 @@ MainActivity：轮询 /healthz 健康后 WebView 加载 index.html
 2. push 或手动触发 Actions → 自动产出 `stronghold-shell-apk` artifact
 3. （可选）填 `scripts/fetch_bundle.sh` 的逻辑会自动拉最新上游包打进 APK
 
-## 首次接入必看
+## 云构建排错备忘（实测踩坑）
 
-`VersionedNodeJs.kt` 里的 `NODE_CLASS` 常量需与所用 nodejs-mobile AAR 一致。
-不同版本类名可能不同，用以下命令确认：
-```bash
-unzip -l nodejs-mobile-*.aar | grep -i node
-```
+1. **不要用 `android-actions/setup-android@v3`**：新版 ubuntu runner 已预装 SDK，
+   该 action 会执行已废弃的 `sdkmanager tools` 而报 `Failed to find package 'tools'`。
+   直接用 runner 的 `ANDROID_HOME` 即可。
+2. **必须提供 `mipmap/ic_launcher`**：manifest 引用了它，缺了会
+   `AAPT: error: resource mipmap/ic_launcher not found`。本仓库带 5 套密度 PNG。
+3. `gradle-wrapper.jar` / `gradlew` 未提交时，workflow 会用 runner 全局
+   `gradle wrapper --gradle-version 8.7` 现场生成。
+4. Gradle 8.7 + AGP 8.5.2 需 JDK 17（workflow 已配 temurin 17）。
 
 ## 版本标记
 
