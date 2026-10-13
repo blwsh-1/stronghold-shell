@@ -43,6 +43,19 @@ object NodeRunner {
 
         nodeThread = Thread {
             try {
+                // 0) 切换进程工作目录到 bundle 根（Node 读取 package.json/资源的相对路径依赖 cwd）
+                val dir = File(bundleDir)
+                if (dir.isDirectory) {
+                    try {
+                        com.sun.jna.NativeLibrary.getInstance("c")
+                            .getFunction("chdir")
+                            .invokeInt(arrayOf(bundleDir))
+                        Log.i(TAG, "chdir -> $bundleDir")
+                    } catch (e: Throwable) {
+                        Log.w(TAG, "chdir 失败: ${e.message}")
+                    }
+                }
+
                 // 1) 载入 libnode.so
                 System.loadLibrary("node")
                 Log.i(TAG, "libnode.so 载入成功")
@@ -52,10 +65,12 @@ object NodeRunner {
                 val startFn = nl.getFunction(START_SYMBOL)
                 Log.i(TAG, "已获取 $START_SYMBOL")
 
-                // 3) 构造 argv
+                // 3) 构造 argv：Node 约定 argv[0]=可执行名, argv[1]=脚本路径, 之后是传给脚本的参数
+                //    脚本用绝对路径最稳；上游 server/index.js 会自行读取同目录资源。
+                val scriptPath = File(dir, entryName).absolutePath
                 val argv = arrayOf(
-                    entryName,              // argv[0]
-                    "--root=$bundleDir"     // 告诉 main.js 自己的根目录
+                    "node",      // argv[0]
+                    scriptPath   // argv[1]
                 )
                 val argvMem = com.sun.jna.Memory(8L * argv.size.toLong())
                 for (i in argv.indices) {
