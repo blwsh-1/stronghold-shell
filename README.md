@@ -1,9 +1,18 @@
 # StrongholdShell —— 卫戍协议：盟约 · 安卓版（自建壳）
 
-自建的极简 Android 壳：**WebView + 内嵌 Node 服务器**，把 `sganggs/Stronghold-Protocol`
+> ## 🎮 游戏本体来自上游项目
+> ### 👉 https://github.com/sganggs/Stronghold-Protocol
+> **本项目只提供「安卓壳」（把游戏装进手机的容器），游戏内容完全来自上面这个上游项目。**
+> 想看游戏源码、提游戏相关的 issue、了解玩法与开发，请去上游仓库。
+>
+> 本仓库 = 上游游戏 + 我们自写的安卓壳（WebView + 内嵌 Node）。
+
+自建的极简 Android 壳：**WebView + 内嵌 Node 服务器**，把上游
+[`sganggs/Stronghold-Protocol`](https://github.com/sganggs/Stronghold-Protocol)
 这类「Node + 前端」的浏览器游戏装进手机，**离线单机可玩**，也能当房主让同一 Wi-Fi 的朋友连进来。
 
-- 📦 **安装包**：见本仓库 [Releases](../../releases/latest)，文件名 `Stronghold-Protocol-v<版本>-android.apk`
+- 🎮 **游戏本体**：<https://github.com/sganggs/Stronghold-Protocol>（上游，**先看这个**）
+- 📦 **安卓安装包**：见本仓库 [Releases](../../releases/latest)，文件名 `Stronghold-Protocol-v<版本>-android.apk`
 - 🔧 **壳源码完全自写**（7 个 Kotlin 文件 + 构建脚本），**不含游戏素材**
 - 🔁 **上游更新时可一键同步重建**（见下方「跟上游更新」）
 
