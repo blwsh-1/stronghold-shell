@@ -215,13 +215,26 @@ class MainActivity : AppCompatActivity() {
 
     /** 服务没起来时的兜底提示（黑屏看门狗思路：不崩，只提示 + 重试） */
     private fun showErrorAndRetry() {
+        // 区分两种情形，给用户明确指引：
+        //   ① 有导入包但 Node 没起来 → 多半是 libnode 运行时版本问题（已知卡点）
+        //   ② 压根没导入包 → 提示先去导入
+        val hasPack = GamePack.hasActivePack(this)
+        val hint = if (hasPack)
+            "<p>Node 运行时未就绪。</p>" +
+            "<p style=\"color:#f0883e\">若使用上游 v0.2.2+ 完整包，需要 Node&nbsp;≥&nbsp;22；" +
+            "当前内置运行时版本可能不足（等待 libnode 升级）。</p>" +
+            "<p style=\"color:#888\">游戏包已成功导入，导入流程本身正常。</p>"
+        else
+            "<p>尚未导入游戏包。</p>" +
+            "<p style=\"color:#888\">请返回上一页点击「导入游戏包 (.zip)」。</p>"
+
         webView.loadDataWithBaseURL(
             null,
             """
             <html><body style="background:#111;color:#eee;font-family:sans-serif;
-                 display:flex;align-items:center;justify-content:center;flex-direction:column;height:100%">
+                 display:flex;align-items:center;justify-content:center;flex-direction:column;height:100%;padding:0 24px;text-align:center">
             <h2>本地服务未就绪</h2>
-            <p>Node 服务器启动失败或超时。</p>
+            $hint
             <p style="color:#888">即将自动重试…</p>
             </body></html>
             """.trimIndent(),
