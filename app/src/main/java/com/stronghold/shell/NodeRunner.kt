@@ -59,9 +59,9 @@ object NodeRunner {
                 )
                 val argvMem = com.sun.jna.Memory(8L * argv.size.toLong())
                 for (i in argv.indices) {
-                    argvMem.setPointer((i * 8).toLong(), com.sun.jna.Memory(argv[i].length + 1).apply {
-                        write(0, argv[i].toByteArray(), 0, argv[i].length)
-                        setByte(argv[i].length.toLong(), 0)
+                    argvMem.setPointer((i * 8).toLong(), com.sun.jna.Memory((argv[i].length + 1).toLong()).apply {
+                        write(0L, argv[i].toByteArray(), 0, argv[i].length)
+                        setByte(argv[i].length.toLong(), 0.toByte())
                     })
                 }
 
