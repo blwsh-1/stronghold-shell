@@ -20,6 +20,9 @@ import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.webkit.WebViewAssetLoader
 import java.net.HttpURLConnection
 import java.net.URL
@@ -73,6 +76,9 @@ class MainActivity : AppCompatActivity() {
         )
         setupWebView()
 
+        // 2.5) 沉浸式全屏：隐藏状态栏 + 导航栏，滑动才临时唤出（需在 setContentView 之后）
+        setupImmersiveMode()
+
         // 3) 注册服务状态广播
         registerReceiverCompat()
 
@@ -119,6 +125,33 @@ class MainActivity : AppCompatActivity() {
         // 长按禁用（游戏内不需要）
         webView.isLongClickable = false
         webView.setOnLongClickListener { true }
+    }
+
+    /**
+     * 沉浸式全屏：内容延伸到状态栏/导航栏区域，并隐藏两者。
+     * 用户从边缘滑动时临时唤出，几秒后自动收起（BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE）。
+     */
+    private fun setupImmersiveMode() {
+        // 让内容延伸到系统栏区域（配合 hide 才是真全屏）
+        WindowCompat.setDecorFitsSystemWindows(window, false)
+
+        val controller = WindowInsetsControllerCompat(window, window.decorView)
+        // 系统栏隐藏后，滑动才临时显示
+        controller.systemBarsBehavior =
+            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        // 隐藏状态栏 + 导航栏
+        controller.hide(WindowInsetsCompat.Type.systemBars())
+    }
+
+    /** 窗口重新获得焦点时再隐藏一次（有些系统/场景会把系统栏弹回来） */
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            val controller = WindowInsetsControllerCompat(window, window.decorView)
+            controller.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller.hide(WindowInsetsCompat.Type.systemBars())
+        }
     }
 
     private fun registerReceiverCompat() {
