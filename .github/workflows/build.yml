@@ -18,8 +18,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: 设置 Android SDK
-        uses: android-actions/setup-android@v3
+      # 注：ubuntu-latest runner 已预装 Android SDK，直接用，无需 setup-android
+      - name: 显示环境
+        run: |
+          echo "ANDROID_HOME=${ANDROID_HOME:-未设置}"
+          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-未设置}"
+          ls "${ANDROID_HOME:-/usr/local/lib/android/sdk}" 2>/dev/null | head
+          which gradle && gradle --version || echo "未找到全局 gradle"
 
       - name: 缓存 Gradle
         uses: actions/cache@v4
@@ -30,21 +35,11 @@ jobs:
           key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
           restore-keys: ${{ runner.os }}-gradle-
 
-      - name: 设置 Gradle 权限
-        run: chmod +x ./gradlew || true
-
-      - name: 生成 Gradle Wrapper（若缺失）
-        run: |
-          if [ ! -f ./gradlew ]; then
-            gradle wrapper --gradle-version 8.7
-            chmod +x ./gradlew
-          fi
-
       # 下载 libnode.so 到 jniLibs（不把 60MB 二进制存进仓库）
       - name: 准备 libnode.so
         run: bash scripts/fetch_libnode.sh
 
-      # 下载上游游戏包并打包成 app_bundle.zip 放 assets（可选，见 README）
+      # 下载上游游戏包并打包成 app_bundle.zip 放 assets（可选）
       - name: 准备 app_bundle（若提供了下载脚本）
         run: |
           if [ -f scripts/fetch_bundle.sh ]; then
@@ -53,8 +48,16 @@ jobs:
             echo "未提供 fetch_bundle.sh，跳过素材打包（产出的 APK 将不含游戏内容）"
           fi
 
+      - name: 生成 Gradle Wrapper（若缺失）
+        run: |
+          if [ ! -f ./gradlew ]; then
+            echo "==> gradlew 缺失，用全局 gradle 生成 wrapper"
+            gradle wrapper --gradle-version 8.7
+          fi
+          chmod +x ./gradlew
+
       - name: 构建 Release APK
-        run: ./gradlew :app:assembleRelease --stacktrace
+        run: ./gradlew :app:assembleRelease --stacktrace --no-daemon
 
       - name: 上传 APK 产物
         uses: actions/upload-artifact@v4
