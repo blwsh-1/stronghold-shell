@@ -10,21 +10,26 @@ import java.util.zip.ZipInputStream
 /**
  * 游戏包（Content Pack）管理器 —— 启动器的核心。
  *
- * 【背景】上游 sganggs/Stronghold-Protocol 的 Release 完整包结构：
- *   Stronghold-Protocol-v0.2.5.zip
- *     ├── MANIFEST.json                ← 根部
- *     └── Stronghold-Protocol/         ← 单层顶层文件夹
- *           ├── server/index.js        ← 入口
- *           ├── shared/ data/ public/ packs/
- *           ├── node_modules/          ← 已装好（npm ci --omit=dev）
- *           └── package.json
+ * 【背景】上游 sganggs/Stronghold-Protocol 的 Release 完整包结构
+ *   （经 dsh 实测 + sha256 校验，2026-10-13）：
  *
- * 【坑】不能假设「根下只有一个文件夹」，要**找名为 Stronghold-Protocol 的顶层目录**；
- *       但若用户导入的是「已经进入该目录」的包，则顶层就是 server/ 等，需要兼容。
+ *   Stronghold-Protocol-v0.2.5.zip   （579MB，共 21142 个条目）
+ *     └── Stronghold-Protocol/       ← 【严格单层，唯一顶层目录】
+ *           ├── MANIFEST.json        ← 【注意：在文件夹里，不在 zip 根】
+ *           ├── package.json         ← scripts.start = "node server/index.js"
+ *           │                          engines.node = ">=22"
+ *           ├── server/index.js      ← 入口
+ *           ├── node_modules/        ← 6367 条，已自带（无需 npm install）
+ *           ├── public/vendor/  data/  packs/
+ *           └── ...
+ *
+ * 【坑】不同打包方式可能不同，所以仍用「探测式」定位游戏根（找含
+ *       node_modules + 入口的目录），但**校验必须严格**：没有
+ *       node_modules 就视为不完整包，安装时直接拒绝并提示用户。
  *
  * 【与本壳原逻辑的关系】
  *   原壳：assets/app_bundle.zip → filesDir/bundle/
- *   本启动器：用户导入 zip → filesDir/packs/<版本>/  （不动 assets，纯导入）
+ *   本启动器：用户导入 zip → filesDir/packs/active/  （不动 assets，纯导入）
  */
 object GamePack {
 
@@ -84,6 +89,53 @@ object GamePack {
             tmp.deleteRecursively()
             tmp.mkdirs()
 
+            // ⭐ 空间预检（解压前！）：先用 zip 的条目未压缩大小估算所需空间
+            //    上游完整包（v0.2.5）dsh 实测解压后约 0.76GB，手机存储紧张时必须提前拦。
+            //    ⚠️ 注意：用 ZipInputStream 流式读取时 entry.size 常为 -1（未知），
+            //       若直接累加会得到 0 → 预检形同虚设。故采用「双通道」：
+            //       ① 能拿到有效 size 的条目就累加；
+            //       ② 若有效条目过少（size 大量缺失），改用「压缩包大小 × 3」保守估算
+            //          （dsh 实测上游包压缩率约 141.5%，×3 已是安全余量）。
+            val pre = try {
+                val compressed = try {
+                    context.contentResolver.openInputStream(uri)?.use { it.available().toLong() } ?: 0L
+                } catch (_: Exception) { 0L }
+                var sum = 0L; var known = 0; var total = 0
+                context.contentResolver.openInputStream(uri)?.use { ins ->
+                    java.util.zip.ZipInputStream(ins).use { z ->
+                        var e = z.nextEntry
+                        while (e != null) {
+                            total++
+                            if (e.size >= 0) { sum += e.size; known++ }
+                            z.closeEntry()
+                            e = z.nextEntry
+                        }
+                    }
+                }
+                longArrayOf(sum, known.toLong(), total.toLong(), compressed)
+            } catch (e: Exception) { longArrayOf(0L, 0L, 0L, 0L) }
+            val sumKnown = pre[0]; val knownCount = pre[1]; val totalCount = pre[2]; val zipFileSize = pre[3]
+            // 判定：有效条目占比 < 50% 视为 size 不可靠，退化估算
+            val needBytes: Long = if (knownCount > 0 && knownCount * 2 >= totalCount) {
+                sumKnown
+            } else if (zipFileSize > 0) {
+                zipFileSize * 3L
+            } else {
+                sumKnown
+            }
+
+            if (needBytes > 0) {
+                val usable = packsRoot(context).usableSpace
+                // 留 300MB 余量（解压过程中还会写日志/缓存）
+                val margin = 300L * 1024 * 1024
+                if (usable < needBytes + margin) {
+                    Log.e(TAG, "空间不足：需要约 ${needBytes / 1024 / 1024}MB，可用 ${usable / 1024 / 1024}MB")
+                    FileLogger.log("导入失败：存储空间不足（需约 ${needBytes / 1024 / 1024}MB，可用 ${usable / 1024 / 1024}MB）")
+                    return null
+                }
+                Log.i(TAG, "空间预检通过：需要 ${needBytes / 1024 / 1024}MB，可用 ${usable / 1024 / 1024}MB")
+            }
+
             // 2) 流式解压到临时目录（防目录穿越）
             context.contentResolver.openInputStream(uri)?.use { ins ->
                 ZipInputStream(ins.buffered()).use { zis ->
@@ -112,10 +164,26 @@ object GamePack {
                 }
             } ?: return null
 
-            // 3) 定位真正的游戏根（处理「单层 Stronghold-Protocol/」这个坑）
+            // 3) 定位真正的游戏根（处理「单层 Stronghold-Protocol/」包裹）
             val gameRoot = locateGameRoot(tmp)
             if (gameRoot == null) {
-                Log.e(TAG, "包的目录结构不对：找不到 server/index.js 或 node_modules")
+                Log.e(TAG, "包的目录结构不对：找不到含 node_modules 与 server/index.js 的目录")
+                FileLogger.log("导入失败：包结构不对（缺 node_modules 或 server/index.js）")
+                tmp.deleteRecursively()
+                return null
+            }
+
+            // 3.5) 【严格校验】明确检查 node_modules 与入口，给出精准错误
+            //      —— 依 dsh 第 10 封建议：宁可在导入时报错，不要装完启动失败。
+            if (!File(gameRoot, "node_modules").isDirectory) {
+                Log.e(TAG, "包不完整：缺 node_modules（可能导入了 lite/源码包）")
+                FileLogger.log("导入失败：缺 node_modules，请使用【完整包】而非 lite/源码包")
+                tmp.deleteRecursively()
+                return null
+            }
+            if (findEntry(gameRoot) == null) {
+                Log.e(TAG, "包不完整：找不到入口 server/index.js")
+                FileLogger.log("导入失败：找不到入口 server/index.js")
                 tmp.deleteRecursively()
                 return null
             }
@@ -170,7 +238,11 @@ object GamePack {
      *   1. 当前目录本身含 node_modules + entry → 就是它
      *   2. 直接子目录中名为 Stronghold-Protocol / stronghold-protocol 的
      *   3. 任意直接子目录里含 node_modules 且含 entry
-     *   4. 再往下找一层（兼容多级）
+     *   4. 再往下递归一层（兼容多级包裹）
+     *
+     * 【严格】最终必须满足 isGameRoot（即同时有 node_modules 和入口），
+     *        否则返回 null，由上层拒绝安装并提示「包不完整」。
+     *        —— 依 dsh 第 10 封建议：宁可在导入时报错，也不要装完启动失败。
      */
     private fun locateGameRoot(dir: File): File? {
         if (isGameRoot(dir)) return dir
@@ -182,14 +254,14 @@ object GamePack {
             it.name.equals("Stronghold-Protocol", ignoreCase = true)
         }?.let { named ->
             if (isGameRoot(named)) return named
-            // 名字对上但没有 node_modules，也优先返回它（可能用户手动装依赖）
+            // 名字对上但还不是游戏根 → 递归往里找（可能又包了一层）
             locateGameRoot(named)?.let { return it }
         }
 
         // 其次找含 node_modules 的
         children.firstOrNull { isGameRoot(it) }?.let { return it }
 
-        // 最后一层递归
+        // 最后递归
         for (c in children) {
             locateGameRoot(c)?.let { return it }
         }
