@@ -3,5 +3,11 @@
     <style name="Theme.StrongholdShell" parent="Theme.AppCompat.NoActionBar">
         <item name="android:windowBackground">@android:color/black</item>
         <item name="android:windowNoTitle">true</item>
+        <!-- 沉浸式：系统栏透明 + 内容延伸，配合代码里的 hide 实现真全屏 -->
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowTranslucentStatus">false</item>
+        <item name="android:windowTranslucentNavigation">false</item>
     </style>
 </resources>
