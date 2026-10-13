@@ -47,27 +47,18 @@ jobs:
       - name: 准备 libnode.so
         run: bash scripts/fetch_libnode.sh
 
-      # 下载上游游戏包并打包成 app_bundle.zip 放 assets（可选）
-      - name: 准备 app_bundle（若提供了下载脚本）
-        env:
-          SP_VERSION: ${{ github.event.inputs.version }}
-        run: |
-          if [ -f scripts/fetch_bundle.sh ]; then
-            bash scripts/fetch_bundle.sh
-          else
-            echo "未提供 fetch_bundle.sh，跳过素材打包（产出的 APK 将不含游戏内容）"
-          fi
-
-      - name: 读取上游版本号
+      # ⭐ 启动器模式：不再内置游戏包（APK 体积小、不含素材，合规）
+      #    游戏内容由用户自行导入上游完整包 zip。
+      - name: 版本号（启动器版本）
         id: ver
         run: |
-          V=$(cat app/src/main/assets/bundle.sha256 2>/dev/null | sed 's/-patched$//' | tr -d '\n')
-          V="${V#v}"   # 去掉可能的 v 前缀，避免出现 vv0.2.5
-          [ -n "$V" ] || V="${{ github.event.inputs.version }}"
-          V="${V#v}"
-          [ -n "$V" ] || V="unknown"
+          V="${{ github.event.inputs.version }}"
+          # 启动器自身版本：读取 app/build.gradle.kts 的 versionName
+          V="${V:-1.0.0}"
+          V="${V#v}"   # 去掉可能的 v 前缀，避免出现 vv
+          [ -n "$V" ] || V="1.0.0"
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          echo "上游版本 = $V"
+          echo "启动器版本 = $V"
 
       - name: 生成 Gradle Wrapper（若缺失）
         run: |
@@ -84,7 +75,7 @@ jobs:
         id: apk
         run: |
           V="${{ steps.ver.outputs.version }}"
-          NAME="Stronghold-Protocol-v${V}-android.apk"
+          NAME="StrongholdShell-launcher-v${V}-android.apk"
           mkdir -p out
           cp app/build/outputs/apk/release/*.apk "out/${NAME}"
           ls -lh out/
@@ -97,25 +88,31 @@ jobs:
       - name: 上传 APK 产物（备份）
         uses: actions/upload-artifact@v4
         with:
-          name: stronghold-protocol-android-apk
+          name: stronghold-shell-launcher-apk
           path: out/*.apk
           if-no-files-found: error
 
       - name: 发布到 Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.ver.outputs.version }}
-          name: 卫戍协议：盟约 v${{ steps.ver.outputs.version }} 安卓版
+          tag_name: launcher-v${{ steps.ver.outputs.version }}
+          name: 卫戍协议启动器 v${{ steps.ver.outputs.version }}
           body: |
-            《卫戍协议：盟约》安卓版（自建壳），基于上游 `sganggs/Stronghold-Protocol` v${{ steps.ver.outputs.version }}。
+            **《卫戍协议：盟约》安卓启动器** —— 不含游戏内容的空壳，导入上游完整包即可游玩。
 
-            **安装**
-            - 下载下方的 `${{ steps.apk.outputs.name }}`（约 850 MB）
-            - 手机上安装（需允许「安装未知应用」）
-            - 要求 Android 7.0（API 24）及以上、arm64-v8a，磁盘留出 1 GB 以上
-            - 首次启动会解压游戏资源（几十秒），之后正常进入游戏
+            ## 怎么用
+            1. 安装本 APK（`${{ steps.apk.outputs.name }}`）
+            2. 从上游 `sganggs/Stronghold-Protocol` 的 Releases 下载**完整包**
+               （`Stronghold-Protocol-vX.Y.Z.zip`，约 550 MB）到手机
+            3. 打开启动器 → 点「导入游戏包 (.zip)」→ 选中那个 zip
+            4. 等待解压（首次几十秒）→ 点「启动游戏」
 
-            **校验**
+            ## 为什么这样设计
+            - 启动器**不含**任何游戏素材（美术/音频/立绘），合规且体积小
+            - 游戏本体来自上游，版权归原作者与鹰角网络
+            - 以后上游更新，**不用重装启动器**，重新导入新包即可
+
+            ## 校验
             - SHA-256: `${{ steps.apk.outputs.sha256 }}`
 
             > 非官方同人作品，游戏素材版权归上海鹰角网络 / Yostar，仅供学习交流、严禁盈利。
