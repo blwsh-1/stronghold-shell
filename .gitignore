@@ -1,0 +1,23 @@
+# Gradle
+.gradle/
+build/
+app/build/
+
+# 本地配置
+local.properties
+.idea/
+*.iml
+
+# 构建产物
+*.apk
+*.aab
+
+# ⚠️ 游戏素材：绝不提交
+app/src/main/assets/app_bundle.zip
+app/src/main/assets/bundle.sha256
+
+# ⚠️ 60MB 二进制：CI 里自动下载
+app/src/main/jniLibs/**/*.so
+
+# 系统
+.DS_Store
