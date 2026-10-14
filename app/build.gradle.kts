@@ -12,7 +12,7 @@ android {
         minSdk = 24
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "1.0.0"
         // 只保留 arm64（与游戏前端一致，体积最小）
         ndk {
             abiFilters += listOf("arm64-v8a")
