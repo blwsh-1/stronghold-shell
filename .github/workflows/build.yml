@@ -52,8 +52,11 @@ jobs:
       - name: 版本号（启动器版本）
         id: ver
         run: |
+          # 手动触发时以输入为准；否则从 app/build.gradle.kts 读 versionName
           V="${{ github.event.inputs.version }}"
-          # 启动器自身版本：读取 app/build.gradle.kts 的 versionName
+          if [ -z "$V" ]; then
+            V=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
+          fi
           V="${V:-1.0.0}"
           V="${V#v}"   # 去掉可能的 v 前缀，避免出现 vv
           [ -n "$V" ] || V="1.0.0"
