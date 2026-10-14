@@ -12,7 +12,7 @@ android {
         minSdk = 24
         targetSdk = 34
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "1.0.0"
         // 只保留 arm64（与游戏前端一致，体积最小）
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -27,6 +27,22 @@ android {
     // 我们把预编译的 libnode.so 放到 app/src/main/jniLibs/arm64-v8a/
     sourceSets["main"].jniLibs.srcDirs("src/main/jniLibs")
 
+    // ===== 固定签名配置 =====
+    // 有 keystore（app/stronghold.jks，由 CI 从 Secrets 还原）时用它签名，
+    // 保证每次构建证书一致 → 可覆盖升级、不丢已导入的游戏包。
+    // 没有则回退 debug 签名（本地随手构建用）。
+    val ksFile = rootProject.file("app/stronghold.jks")
+    signingConfigs {
+        if (ksFile.exists()) {
+            create("release") {
+                storeFile = ksFile
+                storePassword = System.getenv("KEY_STORE_PASSWORD") ?: ""
+                keyAlias = System.getenv("KEY_ALIAS") ?: ""
+                keyPassword = System.getenv("KEY_PASSWORD") ?: ""
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -34,8 +50,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // 用 debug 签名即可自用；正式发布请换 keystore
-            signingConfig = signingConfigs.getByName("debug")
+            // 有固定 keystore 就用它；否则退回 debug（仅本地应急）
+            signingConfig = if (ksFile.exists()) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 

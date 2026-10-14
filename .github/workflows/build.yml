@@ -52,8 +52,11 @@ jobs:
       - name: 版本号（启动器版本）
         id: ver
         run: |
+          # 手动触发时以输入为准；否则从 app/build.gradle.kts 读 versionName
           V="${{ github.event.inputs.version }}"
-          # 启动器自身版本：读取 app/build.gradle.kts 的 versionName
+          if [ -z "$V" ]; then
+            V=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
+          fi
           V="${V:-1.0.0}"
           V="${V#v}"   # 去掉可能的 v 前缀，避免出现 vv
           [ -n "$V" ] || V="1.0.0"
@@ -68,7 +71,28 @@ jobs:
           fi
           chmod +x ./gradlew
 
+      # ⭐ 固定签名：从 Secrets 还原 keystore，保证每次构建签名的证书一致，
+      #    这样后续版本可以「覆盖升级」而不必卸载（不丢已导入的游戏包）。
+      - name: 准备签名 keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_B64" ]; then
+            echo "::warning::未配置 KEYSTORE_B64，将回退到 debug 签名（每次构建签名都会变！）"
+            exit 0
+          fi
+          echo "$KEYSTORE_B64" | base64 -d > app/stronghold.jks
+          ls -lh app/stronghold.jks
+          echo "keystore 已还原"
+
       - name: 构建 Release APK
+        env:
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: ./gradlew :app:assembleRelease --stacktrace --no-daemon
 
       - name: 收集 APK 并正式命名

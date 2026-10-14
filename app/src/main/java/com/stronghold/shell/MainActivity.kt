@@ -179,18 +179,70 @@ class MainActivity : AppCompatActivity() {
         Log.i(TAG, "已请求启动 NodeService")
     }
 
-    /** 轮询健康检查，健康则加载游戏；最多尝试 ~30 秒 */
+    /**
+     * 轮询健康检查，健康则加载游戏。
+     *
+     * 上游 Node 服务器首次启动需要较长时间（实测几十秒 ~ 1 分钟，
+     * 因为要加载 21165 个文件的站点资源）。故：
+     *   - 轮询上限放宽到 ~90 秒（180 × 500ms）
+     *   - 轮询期间显示「正在启动游戏…」加载页（而非黑屏）
+     *   - 每 2 秒更新一次已等待时间，让用户知道在推进
+     */
     private fun pollHealthAndLoad() {
+        showLoadingPage()
         io.execute {
             var ok = false
-            for (i in 1..60) {
+            val maxTries = 180          // 180 × 500ms = 90 秒
+            for (i in 1..maxTries) {
                 if (isServerHealthy()) { ok = true; break }
+                if (i % 4 == 0) {       // 每 2 秒刷新一次提示
+                    val sec = i / 2
+                    mainHandler.post { updateLoadingPage(sec) }
+                }
                 Thread.sleep(500)
             }
             Log.i(TAG, "健康检查结果: $ok")
             if (ok) mainHandler.post { loadGame() }
             else mainHandler.post { showErrorAndRetry() }
         }
+    }
+
+    /** 启动中：显示加载页（替代黑屏） */
+    private fun showLoadingPage() {
+        if (isFinishing || isDestroyed) return
+        webView.loadDataWithBaseURL(
+            null,
+            """
+            <html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+            <style>
+              body{margin:0;height:100vh;display:flex;align-items:center;justify-content:center;
+                   flex-direction:column;background:#0d1117;color:#e6edf3;
+                   font-family:sans-serif;text-align:center}
+              .spin{width:44px;height:44px;border:4px solid #30363d;border-top-color:#58a6ff;
+                    border-radius:50%;animation:r 1s linear infinite;margin-bottom:22px}
+              @keyframes r{to{transform:rotate(360deg)}}
+              .t{font-size:17px;margin-bottom:8px}
+              .s{font-size:13px;color:#7d8590}
+            </style></head>
+            <body>
+              <div class="spin"></div>
+              <div class="t">正在启动游戏…</div>
+              <div class="s" id="tip">首次启动需要约 30~60 秒，请稍候</div>
+            </body></html>
+            """.trimIndent(),
+            "text/html", "UTF-8", null
+        )
+    }
+
+    /** 更新加载页上的等待秒数 */
+    private fun updateLoadingPage(sec: Int) {
+        if (isFinishing || isDestroyed) return
+        // 只在还停留在加载页时更新
+        webView.evaluateJavascript(
+            "document.getElementById('tip') && " +
+            "(document.getElementById('tip').innerText='已等待 ${'$'}{sec} 秒，仍在启动…')",
+            null
+        )
     }
 
     private fun isServerHealthy(): Boolean {
@@ -215,28 +267,17 @@ class MainActivity : AppCompatActivity() {
 
     /** 服务没起来时的兜底提示（黑屏看门狗思路：不崩，只提示 + 重试） */
     private fun showErrorAndRetry() {
-        // 区分三种情形，给用户明确、准确的指引：
-        //   ① 压根没导入包 → 提示先去导入
-        //   ② 有包但 Node 没起来 → 多半是端口占用 / 启动超时 / 包不完整（**不是 Node 版本问题**）
-        //   ③ 包不完整（缺 node_modules 或入口）
-        //
-        // ⚠️ 历史修正（2026-10-13）：
-        //   旧版本这里写过「上游 v0.2.2+ 需要 Node≥22，当前内置版本不足（等待 libnode 升级）」。
-        //   这条**是错的**：经实测，上游/Forge 的 `engines.node >= 22` 只是**声明**，
-        //   内嵌的 nodejs-mobile v18.20.4（Node 18）实测能完整跑通（GET / = 200、/healthz = 200）。
-        //   所以不要再引导用户"等待 libnode 升级"——那会让他们以为无解。
+        // 区分两种情形，给用户明确指引：
+        //   ① 有导入包但 Node 没起来 → 多半是首次启动还没加载完 / 被系统回收
+        //   ② 压根没导入包 → 提示先去导入
         val hasPack = GamePack.hasActivePack(this)
-        val hint = when {
-            !hasPack ->
-                "<p>尚未导入游戏包。</p>" +
-                "<p style=\"color:#888\">请返回上一页点击「导入游戏包 (.zip)」。</p>"
-
-            else ->
-                "<p>本地服务未能就绪（Node 未监听 3000 端口）。</p>" +
-                "<p style=\"color:#f0883e\">常见原因：启动超时、端口被占用、或游戏包不完整。</p>" +
-                "<p style=\"color:#888\">游戏包已成功导入；可返回上一页重新点「启动游戏」，" +
-                "或重新导入一个完整的包。</p>"
-        }
+        val hint = if (hasPack)
+            "<p>游戏服务还没起来（首次启动加载较慢）。</p>" +
+            "<p style=\"color:#888\">游戏包已成功导入，导入流程本身正常；" +
+            "稍等片刻会自动重试。</p>"
+        else
+            "<p>尚未导入游戏包。</p>" +
+            "<p style=\"color:#888\">请返回上一页点击「导入游戏包 (.zip)」。</p>"
 
         webView.loadDataWithBaseURL(
             null,

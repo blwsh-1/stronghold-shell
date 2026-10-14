@@ -57,6 +57,21 @@ class NodeService : Service() {
                 } else {
                     AssetHelper.bundleDir(this)
                 }
+
+            // ⭐ 阶段6：Forge 包 → 保障状态目录存在（mod-registry.json 落 <根>/var）
+            //    并确保 workshop/ 目录存在（mod 装载点）
+            val kind = GamePack.detectKind(bundleDir)
+            if (kind == GamePack.PackKind.FORGE) {
+                GamePack.ensureStateDir(this)
+                val ws = GamePack.workshopDir(this)
+                if (!ws.exists()) ws.mkdirs()
+                val mods = GamePack.listMods(this)
+                Log.i(TAG, "检测到 Forge 包，已装 mod ${mods.size} 个：${mods.joinToString { it.id }}")
+                FileLogger.log("启动 Forge：已装 mod ${mods.size} 个")
+            } else {
+                Log.i(TAG, "检测到上游原版包")
+            }
+
             // ⭐ 上游是 Node.js 服务器，入口为 package.json 的 main：server/index.js
             //    （不是 main.js / index.js，那是旧壳的误写）
             val entryName = GamePack.findEntry(bundleDir) ?: "server/index.js"

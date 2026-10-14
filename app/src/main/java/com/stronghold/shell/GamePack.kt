@@ -54,6 +54,178 @@ object GamePack {
         return findEntry(dir) != null && File(dir, "node_modules").isDirectory
     }
 
+    // ================== 包类型 & mod 支持（阶段6） ==================
+
+    /**
+     * 包类型：上游原版 / Forge（带 workshop 装载器的社区版）。
+     * 判定依据（实测确认，见 docs/STAGE6-FORGE-MOD.md）：
+     *   - Forge 一定自带 workshop/ 目录（即使没装任何 mod）
+     *   - 两者共用同一套根结构（server/ public/ packs/ shared/）
+     */
+    enum class PackKind { UPSTREAM, FORGE }
+
+    /** 判定当前激活包的类型 */
+    fun detectKind(context: Context): PackKind {
+        return detectKind(activeDir(context))
+    }
+
+    fun detectKind(dir: File): PackKind {
+        // workshop/ 存在 → Forge（Forge 仓库自带该目录，仅一个 README）
+        if (File(dir, "workshop").isDirectory) return PackKind.FORGE
+        return PackKind.UPSTREAM
+    }
+
+    /** mod 装载目录：<游戏根>/workshop */
+    fun workshopDir(context: Context): File = File(activeDir(context), "workshop")
+
+    /** mod 状态根目录：<游戏根>/var（mod-registry.json 落这里，绝不能放进 workshop/） */
+    fun stateDir(context: Context): File = File(activeDir(context), "var")
+
+    /**
+     * 确保 Forge 的状态目录存在（mod-registry.json 的落点）。
+     * Forge 源码：stateRootFor = SP_STATE_DIR 或 <repo>/var；缺失时 Forge 会自建，
+     * 但提前建好更稳妥（避免首次加载状态文件失败）。
+     */
+    fun ensureStateDir(context: Context): File {
+        val d = stateDir(context)
+        if (!d.exists()) d.mkdirs()
+        return d
+    }
+
+    /** 一个已装 mod 的元信息 */
+    data class ModInfo(val id: String, val name: String, val version: String, val dir: File)
+
+    /** 列出当前已装的 mod（扫描 workshop/<id>/pack.json） */
+    fun listMods(context: Context): List<ModInfo> {
+        val ws = workshopDir(context)
+        if (!ws.isDirectory) return emptyList()
+        val out = ArrayList<ModInfo>()
+        ws.listFiles()?.filter { it.isDirectory }?.forEach { d ->
+            val manifest = File(d, "pack.json")
+            if (manifest.isFile) {
+                try {
+                    val j = JSONObject(manifest.readText())
+                    out.add(
+                        ModInfo(
+                            id = j.optString("id", d.name),
+                            name = j.optString("name", d.name),
+                            version = j.optString("version", "?"),
+                            dir = d
+                        )
+                    )
+                } catch (_: Exception) {
+                    // pack.json 坏了也列出来，方便用户删掉
+                    out.add(ModInfo(d.name, d.name, "?", d))
+                }
+            }
+        }
+        return out.sortedBy { it.id }
+    }
+
+    /**
+     * 从用户选择的 mod.zip（content:// Uri）安装一个 mod。
+     *
+     * 【机制依据（实测）】：把 mod.zip 解压进 workshop/<id>/ 后重启 Node，
+     * Forge 自动加载 → /healthz 出现 mods 指纹、mod 声明的路由激活。
+     *
+     * @return 安装成功返回 mod 目录，失败返回 null
+     */
+    fun installModFromUri(context: Context, uri: Uri): File? {
+        val ws = workshopDir(context)
+        val tmp = File(packsRoot(context), "mod.installing")
+        try {
+            tmp.deleteRecursively()
+            tmp.mkdirs()
+
+            // 1) 解压到临时目录（防目录穿越）
+            context.contentResolver.openInputStream(uri)?.use { ins ->
+                ZipInputStream(ins.buffered()).use { zis ->
+                    var entry = zis.nextEntry
+                    while (entry != null) {
+                        val name = entry.name
+                        if (!name.endsWith("/")) {
+                            val outFile = File(tmp, name)
+                            if (!outFile.canonicalPath.startsWith(tmp.canonicalPath)) {
+                                Log.w(TAG, "跳过可疑 mod 条目: $name")
+                            } else {
+                                outFile.parentFile?.mkdirs()
+                                outFile.outputStream().use { fos -> zis.copyTo(fos) }
+                            }
+                        } else {
+                            File(tmp, name).mkdirs()
+                        }
+                        zis.closeEntry()
+                        entry = zis.nextEntry
+                    }
+                }
+            } ?: return null
+
+            // 2) 读 pack.json 拿 mod id（决定落地目录名）
+            //    兼容 zip 内可能裹了一层目录：在 tmp 下探测 pack.json
+            var modRoot = tmp
+            if (!File(modRoot, "pack.json").isFile) {
+                // 往下找一层含 pack.json 的目录
+                val sub = tmp.listFiles()?.firstOrNull { File(it, "pack.json").isFile }
+                if (sub != null) modRoot = sub
+            }
+            val manifest = File(modRoot, "pack.json")
+            if (!manifest.isFile) {
+                Log.e(TAG, "不是合法的 mod 包：找不到 pack.json")
+                FileLogger.log("导入 mod 失败：包内没有 pack.json（不是 Forge 工坊包）")
+                tmp.deleteRecursively()
+                return null
+            }
+            val modId = try {
+                JSONObject(manifest.readText()).optString("id", "")
+            } catch (e: Exception) { "" }
+            if (modId.isBlank()) {
+                Log.e(TAG, "mod 包 pack.json 缺 id 字段")
+                FileLogger.log("导入 mod 失败：pack.json 缺 id 字段")
+                tmp.deleteRecursively()
+                return null
+            }
+            if (!modId.matches(Regex("[A-Za-z0-9._-]+"))) {
+                Log.e(TAG, "mod id 含非法字符: $modId")
+                FileLogger.log("导入 mod 失败：id 含非法字符")
+                tmp.deleteRecursively()
+                return null
+            }
+
+            // 3) 落到 workshop/<id>/（同 id 覆盖 = 升级）
+            ws.mkdirs()
+            val dest = File(ws, modId)
+            dest.deleteRecursively()
+            val ok = if (modRoot.absolutePath == tmp.absolutePath) {
+                tmp.renameTo(dest)
+            } else {
+                modRoot.renameTo(dest)
+            }
+            if (!ok) {
+                copyDir(modRoot, dest)
+            }
+            tmp.deleteRecursively()
+
+            Log.i(TAG, "mod 安装完成：$modId -> ${dest.absolutePath}")
+            FileLogger.log("mod 安装完成：$modId")
+            return dest
+        } catch (e: Throwable) {
+            Log.e(TAG, "安装 mod 失败", e)
+            FileLogger.log("安装 mod 失败: ${e.message}")
+            tmp.deleteRecursively()
+            return null
+        }
+    }
+
+    /** 卸载一个 mod（Forge 硬规矩：禁用 = 彻底不在，删目录即可） */
+    fun uninstallMod(context: Context, modId: String): Boolean {
+        val d = File(workshopDir(context), modId)
+        if (!d.exists()) return false
+        val ok = d.deleteRecursively()
+        Log.i(TAG, "mod 已删除：$modId ($ok)")
+        FileLogger.log("mod 已删除：$modId")
+        return ok
+    }
+
     /** 读取已安装包元信息 */
     fun readInfo(context: Context): JSONObject? {
         val f = markerFile(context)
