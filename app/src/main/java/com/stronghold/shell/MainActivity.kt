@@ -215,18 +215,28 @@ class MainActivity : AppCompatActivity() {
 
     /** 服务没起来时的兜底提示（黑屏看门狗思路：不崩，只提示 + 重试） */
     private fun showErrorAndRetry() {
-        // 区分两种情形，给用户明确指引：
-        //   ① 有导入包但 Node 没起来 → 多半是 libnode 运行时版本问题（已知卡点）
-        //   ② 压根没导入包 → 提示先去导入
+        // 区分三种情形，给用户明确、准确的指引：
+        //   ① 压根没导入包 → 提示先去导入
+        //   ② 有包但 Node 没起来 → 多半是端口占用 / 启动超时 / 包不完整（**不是 Node 版本问题**）
+        //   ③ 包不完整（缺 node_modules 或入口）
+        //
+        // ⚠️ 历史修正（2026-10-13）：
+        //   旧版本这里写过「上游 v0.2.2+ 需要 Node≥22，当前内置版本不足（等待 libnode 升级）」。
+        //   这条**是错的**：经实测，上游/Forge 的 `engines.node >= 22` 只是**声明**，
+        //   内嵌的 nodejs-mobile v18.20.4（Node 18）实测能完整跑通（GET / = 200、/healthz = 200）。
+        //   所以不要再引导用户"等待 libnode 升级"——那会让他们以为无解。
         val hasPack = GamePack.hasActivePack(this)
-        val hint = if (hasPack)
-            "<p>Node 运行时未就绪。</p>" +
-            "<p style=\"color:#f0883e\">若使用上游 v0.2.2+ 完整包，需要 Node&nbsp;≥&nbsp;22；" +
-            "当前内置运行时版本可能不足（等待 libnode 升级）。</p>" +
-            "<p style=\"color:#888\">游戏包已成功导入，导入流程本身正常。</p>"
-        else
-            "<p>尚未导入游戏包。</p>" +
-            "<p style=\"color:#888\">请返回上一页点击「导入游戏包 (.zip)」。</p>"
+        val hint = when {
+            !hasPack ->
+                "<p>尚未导入游戏包。</p>" +
+                "<p style=\"color:#888\">请返回上一页点击「导入游戏包 (.zip)」。</p>"
+
+            else ->
+                "<p>本地服务未能就绪（Node 未监听 3000 端口）。</p>" +
+                "<p style=\"color:#f0883e\">常见原因：启动超时、端口被占用、或游戏包不完整。</p>" +
+                "<p style=\"color:#888\">游戏包已成功导入；可返回上一页重新点「启动游戏」，" +
+                "或重新导入一个完整的包。</p>"
+        }
 
         webView.loadDataWithBaseURL(
             null,

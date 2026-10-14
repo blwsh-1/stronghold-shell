@@ -37,6 +37,7 @@ class ImportActivity : AppCompatActivity() {
     private lateinit var progressBar: ProgressBar
     private lateinit var btnImport: Button
     private lateinit var btnLaunch: Button
+    private lateinit var btnMods: Button
     private lateinit var btnDelete: Button
     private lateinit var logText: TextView
 
@@ -102,6 +103,10 @@ class ImportActivity : AppCompatActivity() {
             text = "启动游戏"
             setOnClickListener { launchGame() }
         }
+        btnMods = Button(this).apply {
+            text = "创意工坊（Mod）"
+            setOnClickListener { openMods() }
+        }
         btnDelete = Button(this).apply {
             text = "删除已导入的包"
             setOnClickListener { confirmDelete() }
@@ -123,6 +128,7 @@ class ImportActivity : AppCompatActivity() {
         root.addView(progressBar)
         root.addView(btnLaunch, lp)
         root.addView(btnImport, lp)
+        root.addView(btnMods, lp)
         root.addView(btnDelete, lp)
         root.addView(logText)
 
@@ -135,24 +141,39 @@ class ImportActivity : AppCompatActivity() {
         val hasPack = GamePack.hasActivePack(this)
 
         if (hasPack && info != null) {
+            val modStat = modSummary()
             statusText.text = "已导入游戏包\n版本：${info.optString("version", "unknown")}\n" +
-                "入口：${info.optString("entry", "server/index.js")}"
+                "入口：${info.optString("entry", "server/index.js")}\n" +
+                "Mod：$modStat"
             btnLaunch.isEnabled = true
             btnImport.text = "重新导入（覆盖）"
+            btnMods.isEnabled = true
             btnDelete.isEnabled = true
         } else if (hasPack) {
-            statusText.text = "已导入游戏包（版本信息缺失）"
+            statusText.text = "已导入游戏包（版本信息缺失）\nMod：${modSummary()}"
             btnLaunch.isEnabled = true
             btnImport.text = "重新导入（覆盖）"
+            btnMods.isEnabled = true
             btnDelete.isEnabled = true
         } else {
-            statusText.text = "尚未导入游戏包\n\n请选择上游发布的完整包 zip\n" +
-                "（Stronghold-Protocol-vX.Y.Z.zip）"
+            statusText.text = "尚未导入游戏包\n\n请选择完整包 zip\n" +
+                "（上游 sganggs 或 Forge 版本均可）"
             btnLaunch.isEnabled = false
             btnImport.text = "导入游戏包 (.zip)"
+            btnMods.isEnabled = false
             btnDelete.isEnabled = false
         }
         logText.text = "日志：${FileLogger.readAll().takeLast(300)}"
+    }
+
+    /** Mod 数量摘要（用于首页状态栏） */
+    private fun modSummary(): String {
+        return try {
+            val (enabled, total) = WorkshopHelper.countMods(this)
+            if (total == 0) "未安装" else "已启用 $enabled / 共 $total"
+        } catch (e: Exception) {
+            "读取失败"
+        }
     }
 
     private fun pickZipFile() {
@@ -194,12 +215,22 @@ class ImportActivity : AppCompatActivity() {
         progressBar.visibility = if (busy) ProgressBar.VISIBLE else ProgressBar.GONE
         btnImport.isEnabled = !busy
         btnLaunch.isEnabled = !busy && GamePack.hasActivePack(this)
+        btnMods.isEnabled = !busy && GamePack.hasActivePack(this)
         btnDelete.isEnabled = !busy && GamePack.hasActivePack(this)
         if (msg != null) statusText.text = msg
     }
 
     private fun launchGame() {
         startActivity(Intent(this, MainActivity::class.java))
+    }
+
+    /** 打开创意工坊（Mod 管理） */
+    private fun openMods() {
+        if (!GamePack.hasActivePack(this)) {
+            Toast.makeText(this, "请先导入游戏包，Mod 需要装在游戏包目录下", Toast.LENGTH_LONG).show()
+            return
+        }
+        startActivity(Intent(this, ModActivity::class.java))
     }
 
     private fun confirmDelete() {

@@ -40,6 +40,13 @@
             android:configChanges="orientation|screenSize|keyboardHidden"
             android:screenOrientation="sensorLandscape" />
 
+        <!-- 创意工坊（Mod 管理）：由启动器进入 -->
+        <activity
+            android:name=".ModActivity"
+            android:exported="false"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:screenOrientation="sensorLandscape" />
+
         <service
             android:name=".NodeService"
             android:exported="false"
