@@ -20,5 +20,11 @@ app/src/main/assets/bundle.sha256
 app/src/main/jniLibs/**/*.so
 # prebuilt 里的 libc++_shared.so（6.7MB）需要入库，不排除
 
+# 临时 / 中间产物（绝不提交）
+.tmp_zip_check/
+.tmp_*/
+*.log
+out/
+
 # 系统
 .DS_Store
