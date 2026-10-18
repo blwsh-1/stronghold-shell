@@ -855,13 +855,13 @@ class ImportActivity : AppCompatActivity() {
         }
         val msg = buildString {
             append("本地已有 v${same.version}，可以直接增量升级：")
-            append(NL + NL)
+            append("\n\n")
             append("方式：增量覆盖（只下载改动的代码文件）")
-            append(NL)
+            append("\n")
             append("大小：$sizeText   （完整包约 800MB）")
-            append(NL)
+            append("\n")
             append("目标：${same.dir.name}（原地覆盖）")
-            append(NL + NL)
+            append("\n\n")
             append("升级前会自动备份旧包；若升级后版本号不对，会提示你改用完整包。")
         }
         AlertDialog.Builder(this)
@@ -989,7 +989,7 @@ class ImportActivity : AppCompatActivity() {
                     downloadCard?.visibility = View.GONE
                     AlertDialog.Builder(this@ImportActivity)
                         .setTitle("增量升级失败")
-                        .setMessage(reason + NL + NL + "已回滚到原版本，可以改用完整包重试。")
+                        .setMessage(reason + "\n\n" + "已回滚到原版本，可以改用完整包重试。")
                         .setPositiveButton("用完整包") { _, _ ->
                             val full = UpdateChecker.pickAsset(info, UpdateChecker.PackKind.FULL)
                             preferredKind = UpdateChecker.PackKind.FULL
