@@ -49,6 +49,10 @@ class ImportActivity : AppCompatActivity() {
     private var downloading = false
     private var downloadLabel: TextView? = null
     private var downloadBar: View? = null
+    /** 最近一次测速排好序的镜像（下载时优先用） */
+    private var preferredMirrors: List<Pair<String, String>> = emptyList()
+    /** 本次准备下载哪种包（增量 / 完整 / 精简） */
+    private var preferredKind: UpdateChecker.PackKind = UpdateChecker.PackKind.FULL
     private var downloadCard: LinearLayout? = null
 
     private val pickPackZip = registerForActivityResult(
@@ -489,11 +493,11 @@ class ImportActivity : AppCompatActivity() {
         c.addView(UiKit.spacer(this, 10f))
 
         c.addView(settingRow(
-            "端口", "${cur.port}",
+            "端口", cur.port.toString(),
             "游戏服务器监听端口，默认 3000"
         ) { editNumber("端口", cur.port, 1024, 65535) { v ->
             val p = Settings.load(this); p.port = v; Settings.save(this, p)
-            toast("端口改为 $v（重启游戏生效）"); switchNav(NAV_SETTINGS)
+            toast("端口改为 " + v + "（重启游戏生效）"); switchNav(NAV_SETTINGS)
         } }, cardLp())
 
         c.addView(settingRow(
@@ -501,7 +505,7 @@ class ImportActivity : AppCompatActivity() {
             ":: 为全部网卡（支持局域网联机）"
         ) { chooseString("监听地址", cur.host, listOf("::", "0.0.0.0", "127.0.0.1")) { v ->
             val p = Settings.load(this); p.host = v; Settings.save(this, p)
-            toast("监听地址改为 $v"); switchNav(NAV_SETTINGS)
+            toast("监听地址改为 " + v); switchNav(NAV_SETTINGS)
         } }, cardLp())
 
         c.addView(UiKit.sectionHeader(this, "玩法", "02"))
@@ -559,7 +563,7 @@ class ImportActivity : AppCompatActivity() {
 
         c.addView(UiKit.divider(this, "ABOUT"))
         val about = UiKit.card(this)
-        about.addView(UiKit.label(this, "Stronghold Shell  v${BuildConfig.VERSION_NAME}",
+        about.addView(UiKit.label(this, "Stronghold Shell  v" + BuildConfig.VERSION_NAME,
             14f, UiKit.TEXT_MAIN, true))
         about.addView(UiKit.spacer(this, 6f))
         about.addView(UiKit.label(
@@ -598,6 +602,7 @@ class ImportActivity : AppCompatActivity() {
         card.isFocusable = true
         card.setOnClickListener { onClick() }
         return card
+
     }
 
     private fun editNumber(title: String, cur: Int, min: Int, max: Int, onOk: (Int) -> Unit) {
@@ -648,7 +653,6 @@ class ImportActivity : AppCompatActivity() {
         }
         pickPackZip.launch(i)
     }
-
     /** 导入本地游戏包 zip（后台解压 → 注册版本） */
     private fun doInstallPack(uri: Uri) {
         toast("正在导入，请勿退出…")
@@ -768,18 +772,33 @@ class ImportActivity : AppCompatActivity() {
         val info = updateInfo
         if (info == null) {
             toast("正在查询最新版本…")
-            checkUpdate(
-                silent = false,
-                thenDownload = true
-            )
+            checkUpdate(silent = false, thenDownload = true)
             return
         }
-        val asset = info.fullPack ?: info.litePack
-        if (asset == null) {
-            toast("该版本没有可下载的 zip")
+        proceedDownload(info)
+    }
+
+    /**
+     * 决定下哪种包：
+     *  - 本地没有这个版本  -> 完整包
+     *  - 本地已有这个版本  -> 生成增量升级清单（13MB 级），升级失败可回退完整包
+     */
+    private fun proceedDownload(info: UpdateChecker.ReleaseInfo) {
+        val packs = PackManager.listPacks(this)
+        val same = packs.firstOrNull { it.version == info.version }
+        if (same == null) {
+            val asset = UpdateChecker.pickAsset(info, UpdateChecker.PackKind.FULL)
+            if (asset == null) {
+                toast("该版本没有可下载的完整包")
+                return
+            }
+            preferredKind = UpdateChecker.PackKind.FULL
+            confirmDownload(info, asset)
             return
         }
-        confirmDownload(info, asset)
+        // 已装同版本 -> 走增量更新
+        preferredKind = UpdateChecker.PackKind.UPDATE
+        confirmIncremental(info, same)
     }
 
     private fun confirmDownload(info: UpdateChecker.ReleaseInfo, asset: UpdateChecker.Asset) {
@@ -797,9 +816,190 @@ class ImportActivity : AppCompatActivity() {
         AlertDialog.Builder(this)
             .setTitle("下载 v${info.version}")
             .setMessage(msg)
+            .setNeutralButton("改用增量包") { _, _ ->
+                if (same == null) {
+                    toast("本地还没有这个版本，无法增量升级")
+                } else {
+                    preferredKind = UpdateChecker.PackKind.UPDATE
+                    confirmIncremental(info, same)
+                }
+            }
             .setPositiveButton("开始下载") { _, _ -> doDownload(info, asset) }
             .setNegativeButton("取消", null)
             .show()
+    }
+
+    // ==================== 增量更新（十几 MB 级升级） ====================
+
+    /**
+     * 增量升级确认框。
+     *
+     * 【为什么要增量】上游每个版本提供 -update.zip（纯代码补丁）：
+     *   v0.3.1 完整包 806MB / 增量包 13MB，相差 61 倍。
+     * 【风险】增量包只覆盖「有改动的文件」。若某版把新素材压进完整包，
+     *   增量升级后会缺文件 —— 所以解压完必须校验版本号，不符就提示改用完整包。
+     */
+    private fun confirmIncremental(info: UpdateChecker.ReleaseInfo, same: PackManager.PackEntry) {
+        val asset = UpdateChecker.pickAsset(info, UpdateChecker.PackKind.UPDATE)
+        if (asset == null) {
+            toast("该版本没有增量包，改用完整包")
+            val full = UpdateChecker.pickAsset(info, UpdateChecker.PackKind.FULL)
+            preferredKind = UpdateChecker.PackKind.FULL
+            if (full != null) confirmDownload(info, full) else toast("也没有完整包")
+            return
+        }
+        val sizeText = if (asset.sizeBytes > 0) {
+            "%.1f MB".format(asset.sizeMb)
+        } else {
+            "约 15 MB（大小未知）"
+        }
+        val msg = buildString {
+            append("本地已有 v${same.version}，可以直接增量升级：")
+            append(NL + NL)
+            append("方式：增量覆盖（只下载改动的代码文件）")
+            append(NL)
+            append("大小：$sizeText   （完整包约 800MB）")
+            append(NL)
+            append("目标：${same.dir.name}（原地覆盖）")
+            append(NL + NL)
+            append("升级前会自动备份旧包；若升级后版本号不对，会提示你改用完整包。")
+        }
+        AlertDialog.Builder(this)
+            .setTitle("增量升级到 v${info.version}")
+            .setMessage(msg)
+            .setPositiveButton("开始增量升级") { _, _ -> doIncremental(info, asset, same) }
+            .setNegativeButton("取消", null)
+            .setNeutralButton("改用完整包") { _, _ ->
+                val full = UpdateChecker.pickAsset(info, UpdateChecker.PackKind.FULL)
+                preferredKind = UpdateChecker.PackKind.FULL
+                if (full != null) confirmDownload(info, full) else toast("该版本没有完整包")
+            }
+            .show()
+    }
+
+    private fun doIncremental(
+        info: UpdateChecker.ReleaseInfo,
+        asset: UpdateChecker.Asset,
+        same: PackManager.PackEntry
+    ) {
+        downloading = true
+        downloadCard?.visibility = View.VISIBLE
+        downloadLabel?.text = "准备增量升级…"
+
+        io.execute {
+            val dir = PackDownloader.downloadDir(this@ImportActivity)
+            val dest = File(dir, asset.name)
+            var lastUi = 0L
+
+            // 先测速，挑最快的镜像（6 镜像并发，几秒出结果）
+            if (preferredMirrors.isEmpty()) {
+                ui.post { downloadLabel?.text = "正在测试镜像速度…" }
+                preferredMirrors = try {
+                    PackDownloader.probeMirrors(asset.downloadUrl)
+                } catch (e: Exception) {
+                    emptyList()
+                }
+                FileLogger.log("镜像测速完成：" + preferredMirrors.joinToString { it.second })
+            }
+
+            val ok = PackDownloader.download(
+                url = asset.downloadUrl,
+                dest = dest,
+                expectedSize = asset.sizeBytes,
+                listener = object : PackDownloader.Listener {
+                    override fun onProgress(downloaded: Long, total: Long) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastUi < 300) return
+                        lastUi = now
+                        val tot = if (total > 0) total else asset.sizeBytes
+                        val pctInt = if (tot > 0) (downloaded * 100.0 / tot).toInt() else 0
+                        val dlMb = "%.1f".format(downloaded / 1048576.0)
+                        val totMb = "%.1f".format(tot / 1048576.0)
+                        ui.post {
+                            downloadLabel?.text = "增量包 $dlMb / $totMb MB  ($pctInt%)"
+                            (downloadBar as? View)?.let { v ->
+                                try {
+                                    val m = v.javaClass.getMethod("setProgress", Float::class.java)
+                                    m.invoke(v, if (tot > 0) (downloaded.toFloat() / tot) else 0f)
+                                } catch (_: Exception) {
+                                }
+                            }
+                        }
+                    }
+                },
+                preferredMirrors = preferredMirrors
+            )
+
+            dest.delete()
+            if (!ok) {
+                downloading = false
+                ui.post {
+                    downloadCard?.visibility = View.GONE
+                    toast("增量包下载失败，请检查网络后重试")
+                }
+                return@execute
+            }
+
+            // ---- 备份 -> 覆盖解压 -> 版本校验 ----
+            val backup = File(same.dir.parentFile, same.dir.name + ".bak")
+            var backupMade = false
+            try {
+                ui.post { downloadLabel?.text = "正在应用增量补丁…" }
+                backup.deleteRecursively()
+                backupMade = same.dir.renameTo(backup)
+                if (!backupMade) {
+                    FileLogger.log("警告：旧包备份失败，直接在原目录覆盖")
+                }
+                val target = same.dir
+                if (backupMade) target.mkdirs()
+                ZipInstaller.extractFile(dest, target)
+
+                val newVer = PackManager.readVersionFrom(target)
+                FileLogger.log("增量升级完成：期望 ${info.version}，实际读取 $newVer")
+
+                if (newVer == null || !newVer.contains(info.version.removePrefix("v"))) {
+                    throw IllegalStateException(
+                        "增量包应用后版本号不符（读到 " + (newVer ?: "无") + "），请改用完整包"
+                    )
+                }
+
+                backup.deleteRecursively()
+                PackManager.register(
+                    this@ImportActivity, target, newVer, source = "github", setActive = true
+                )
+                downloading = false
+                ui.post {
+                    downloadCard?.visibility = View.GONE
+                    toast("增量升级完成：v$newVer")
+                    updateInfo = null
+                    switchNav(NAV_HOME)
+                }
+            } catch (e: Exception) {
+                FileLogger.log("增量升级失败：" + e.message)
+                try {
+                    if (backupMade) {
+                        same.dir.deleteRecursively()
+                        backup.renameTo(same.dir)
+                    }
+                } catch (_: Exception) {
+                }
+                downloading = false
+                val reason = e.message ?: "未知错误"
+                ui.post {
+                    downloadCard?.visibility = View.GONE
+                    AlertDialog.Builder(this@ImportActivity)
+                        .setTitle("增量升级失败")
+                        .setMessage(reason + NL + NL + "已回滚到原版本，可以改用完整包重试。")
+                        .setPositiveButton("用完整包") { _, _ ->
+                            val full = UpdateChecker.pickAsset(info, UpdateChecker.PackKind.FULL)
+                            preferredKind = UpdateChecker.PackKind.FULL
+                            if (full != null) confirmDownload(info, full) else toast("该版本没有完整包")
+                        }
+                        .setNegativeButton("关闭", null)
+                        .show()
+                }
+            }
+        }
     }
 
     private fun doDownload(info: UpdateChecker.ReleaseInfo, asset: UpdateChecker.Asset) {
@@ -811,6 +1011,18 @@ class ImportActivity : AppCompatActivity() {
             val dir = PackDownloader.downloadDir(this@ImportActivity)
             val dest = File(dir, asset.name)
             var lastUi = 0L
+
+            // 镜像并发测速：7 个通道各发一个小请求，几秒内挑出最快的
+            if (preferredMirrors.isEmpty()) {
+                ui.post { downloadLabel?.text = "正在测试镜像速度…" }
+                preferredMirrors = try {
+                    PackDownloader.probeMirrors(asset.downloadUrl)
+                } catch (e: Exception) {
+                    emptyList()
+                }
+                val best = preferredMirrors.firstOrNull()?.second ?: "无"
+                FileLogger.log("镜像测速完成，最快：$best")
+            }
 
             val ok = PackDownloader.download(
                 url = asset.downloadUrl,
@@ -841,7 +1053,8 @@ class ImportActivity : AppCompatActivity() {
                     override fun onMirror(idx: Int, count: Int, name: String) {
                         ui.post { downloadLabel?.text = "镜像 $name（$idx/$count）下载中…" }
                     }
-                }
+                },
+                preferredMirrors = preferredMirrors
             )
 
             if (!ok) {
@@ -916,8 +1129,8 @@ class ImportActivity : AppCompatActivity() {
                 }
 
                 if (thenDownload) {
-                    val asset = info.fullPack ?: info.litePack
-                    if (asset != null) confirmDownload(info, asset) else toast("该版本无 zip 资产")
+                    // 统一走 proceedDownload：已装同版本会自动转成增量升级
+                    proceedDownload(info)
                     return@post
                 }
 

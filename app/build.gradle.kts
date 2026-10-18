@@ -11,8 +11,8 @@ android {
         applicationId = "com.stronghold.shell"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "2.0.0"
+        versionCode = 3
+        versionName = "2.0.1"
         // 只保留 arm64（与游戏前端一致，体积最小）
         ndk {
             abiFilters += listOf("arm64-v8a")
