@@ -49,35 +49,44 @@ class NodeService : Service() {
 
     private fun startNode() {
         try {
-            // ⭐ 启动器模式：优先用「用户导入的游戏包」(GamePack.activeDir)
-            //    没有导入包时才回退到 assets 内置 bundle（兼容旧流程）
-            val bundleDir: java.io.File =
-                if (GamePack.hasActivePack(this)) {
-                    GamePack.activeDir(this)
-                } else {
-                    AssetHelper.bundleDir(this)
-                }
+            // ⭐ 多版本模式：从 PackManager 取当前激活版本目录
+            //    没有激活包时才回退到 assets 内置 bundle（兼容旧流程）
+            val activeDir = PackManager.activeDir(this)
+            val bundleDir: java.io.File = activeDir ?: AssetHelper.bundleDir(this)
+
+            if (activeDir != null) {
+                Log.i(TAG, "使用激活版本：${PackManager.activeId(this)} @ ${activeDir.absolutePath}")
+            } else {
+                Log.i(TAG, "无已安装版本，回退到内置 bundle")
+            }
 
             // ⭐ 阶段6：Forge 包 → 保障状态目录存在（mod-registry.json 落 <根>/var）
             //    并确保 workshop/ 目录存在（mod 装载点）
-            val kind = GamePack.detectKind(bundleDir)
-            if (kind == GamePack.PackKind.FORGE) {
-                GamePack.ensureStateDir(this)
-                val ws = GamePack.workshopDir(this)
+            val kind = PackManager.detectKindAt(bundleDir)
+            if (kind == "FORGE") {
+                val varDir = java.io.File(bundleDir, "var")
+                if (!varDir.exists()) varDir.mkdirs()
+                val ws = java.io.File(bundleDir, "workshop")
                 if (!ws.exists()) ws.mkdirs()
-                val mods = GamePack.listMods(this)
+                val mods = GamePack.listModsAt(ws)
                 Log.i(TAG, "检测到 Forge 包，已装 mod ${mods.size} 个：${mods.joinToString { it.id }}")
                 FileLogger.log("启动 Forge：已装 mod ${mods.size} 个")
             } else {
-                Log.i(TAG, "检测到上游原版包")
+                // 0.3.0+ 官方插件体系
+                val plugins = PluginManager.list(bundleDir)
+                if (plugins.isNotEmpty()) {
+                    Log.i(TAG, "官方插件 ${plugins.size} 个：${plugins.joinToString { it.id }}")
+                    FileLogger.log("启动原版：已装插件 ${plugins.size} 个")
+                } else {
+                    Log.i(TAG, "检测到上游原版包（无插件）")
+                }
             }
 
             // ⭐ 上游是 Node.js 服务器，入口为 package.json 的 main：server/index.js
-            //    （不是 main.js / index.js，那是旧壳的误写）
             val entryName = GamePack.findEntry(bundleDir) ?: "server/index.js"
             Log.i(TAG, "启动 Node，目录：${bundleDir.absolutePath} 入口：$entryName")
 
-            // ⭐ JNA 直调 libnode.so 的 node::Start
+            // ⭐ JNA 直调 libnode.so 的 node::Start（自动注入设置里的环境变量）
             val logFile = java.io.File(bundleDir, "server.log")
             NodeRunner.start(this, bundleDir.absolutePath, entryName, logFile)
 

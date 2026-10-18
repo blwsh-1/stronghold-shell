@@ -36,6 +36,26 @@ object NodeRunner {
      * @param logFile   输出重定向日志文件（null 则只到 logcat）
      */
     fun start(context: Context, bundleDir: String, entryName: String, logFile: File?) {
+        // 从设置读取环境变量（PORT / SP_COMBAT / SP_PLUGIN_SCRIPTS 等）
+        val env = try {
+            Settings.toEnv(Settings.load(context))
+        } catch (_: Exception) { emptyMap() }
+        startWithEnv(context, bundleDir, entryName, logFile, env)
+    }
+
+    /**
+     * 带环境变量启动。
+     *
+     * 【原理】Android 的 setenv 只在 C 层生效，Node 启动时会读 environ。
+     * 用 JNA 调 libc 的 setenv() 写入，再调用 node::Start。
+     */
+    fun startWithEnv(
+        context: Context,
+        bundleDir: String,
+        entryName: String,
+        logFile: File?,
+        env: Map<String, String>
+    ) {
         if (running) {
             Log.w(TAG, "Node 已在运行，忽略重复启动")
             return
@@ -54,6 +74,18 @@ object NodeRunner {
                     } catch (e: Throwable) {
                         Log.w(TAG, "chdir 失败: ${e.message}")
                     }
+                }
+
+                // 0.5) 注入环境变量（必须在 loaded node 之前/之后都生效，setenv 全局）
+                try {
+                    val libc = com.sun.jna.NativeLibrary.getInstance("c")
+                    val setenv = libc.getFunction("setenv")
+                    for ((k, v) in env) {
+                        setenv.invokeInt(arrayOf(k, v, 1))
+                        Log.i(TAG, "env: $k=$v")
+                    }
+                } catch (e: Throwable) {
+                    Log.w(TAG, "setenv 失败: ${e.message}")
                 }
 
                 // 1) 载入 libnode.so

@@ -21,12 +21,12 @@
         android:usesCleartextTraffic="true"
         android:hardwareAccelerated="true">
 
-        <!-- 启动器入口：游戏包管理（导入/启动/删除） -->
+        <!-- 启动器入口：版本管理 / 插件 / 设置 -->
         <activity
             android:name=".ImportActivity"
             android:exported="true"
             android:configChanges="orientation|screenSize|keyboardHidden"
-            android:screenOrientation="sensorLandscape">
+            android:screenOrientation="sensor">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

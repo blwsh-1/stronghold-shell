@@ -41,4 +41,21 @@ object FileLogger {
             "读取日志失败: ${e.message}"
         }
     }
+
+    /** 只取最后 n 行（诊断报告用） */
+    fun tail(n: Int): String {
+        val all = readAll()
+        if (all.isEmpty()) return "  （暂无日志）"
+        val lines = all.trimEnd().split('\n')
+        val take = if (lines.size <= n) lines else lines.subList(lines.size - n, lines.size)
+        return take.joinToString("\n") { "  $it" }
+    }
+
+    /** 日志文件路径（分享用） */
+    fun logFile(): File? = logFile
+
+    /** 清空日志 */
+    fun clear() {
+        try { logFile?.delete() } catch (_: Exception) {}
+    }
 }

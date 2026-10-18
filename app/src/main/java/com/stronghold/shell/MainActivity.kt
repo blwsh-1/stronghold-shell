@@ -302,6 +302,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+        /**
+     * 返回键：退出游戏页，回到启动器（而不是直接退出整个 App）。
+     * Node 服务是前台服务，会继续在后台跑，再次点「启动游戏」可秒回。
+     */
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        finish()
+    }
+
     override fun onDestroy() {
         try { unregisterReceiver(serverReceiver) } catch (_: Exception) {}
         io.shutdown()

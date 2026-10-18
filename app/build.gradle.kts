@@ -11,8 +11,8 @@ android {
         applicationId = "com.stronghold.shell"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "2.0.0"
         // 只保留 arm64（与游戏前端一致，体积最小）
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -22,6 +22,12 @@ android {
     // 允许不压缩 app_bundle.zip，加速打包（可选）
     androidResources {
         noCompress += listOf("zip")
+    }
+
+    // ⭐ AGP 8+ 默认关闭 BuildConfig 生成，
+    //    但我们的顶部栏 / 关于页都引用了 BuildConfig.VERSION_NAME，必须显式开启。
+    buildFeatures {
+        buildConfig = true
     }
 
     // 我们把预编译的 libnode.so 放到 app/src/main/jniLibs/arm64-v8a/

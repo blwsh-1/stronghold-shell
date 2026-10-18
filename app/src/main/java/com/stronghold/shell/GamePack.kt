@@ -97,7 +97,11 @@ object GamePack {
 
     /** 列出当前已装的 mod（扫描 workshop/<id>/pack.json） */
     fun listMods(context: Context): List<ModInfo> {
-        val ws = workshopDir(context)
+        return listModsAt(workshopDir(context))
+    }
+
+    /** 列出指定 workshop 目录里的 mod（多版本模式下由调用方传入） */
+    fun listModsAt(ws: File): List<ModInfo> {
         if (!ws.isDirectory) return emptyList()
         val out = ArrayList<ModInfo>()
         ws.listFiles()?.filter { it.isDirectory }?.forEach { d ->
