@@ -5,7 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.RectF
+import android.graphics.Rect
 import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.StateListDrawable
@@ -66,13 +66,13 @@ object UiKit {
             private val path = Path()
             private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
 
-            override fun onBoundsChange(bounds: RectF) {
+            override fun onBoundsChange(bounds: Rect) {
                 super.onBoundsChange(bounds)
                 path.reset()
-                val l = bounds.left
-                val t = bounds.top
-                val r = bounds.right
-                val b = bounds.bottom
+                val l = bounds.left.toFloat()
+                val t = bounds.top.toFloat()
+                val r = bounds.right.toFloat()
+                val b = bounds.bottom.toFloat()
                 path.moveTo(l, t)
                 path.lineTo(r - cut, t)
                 path.lineTo(r, t + cut)
