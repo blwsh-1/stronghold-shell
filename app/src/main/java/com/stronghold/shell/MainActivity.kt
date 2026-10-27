@@ -127,7 +127,10 @@ class MainActivity : AppCompatActivity() {
         settings.allowFileAccess = true
         settings.allowContentAccess = true
         settings.mediaPlaybackRequiresUserGesture = false
-        settings.cacheMode = WebSettings.LOAD_DEFAULT
+        // 联机模式下必须绕开缓存：否则 index.html 可能直接来自缓存，
+        // shouldInterceptRequest 不触发 → hook 注不进去（这是联机失效的头号原因）
+        settings.cacheMode = if (serverAddress != null) WebSettings.LOAD_NO_CACHE
+                             else WebSettings.LOAD_DEFAULT
         settings.useWideViewPort = true
         settings.loadWithOverviewMode = true
 
@@ -149,6 +152,13 @@ class MainActivity : AppCompatActivity() {
                 // 2) 其余交给 assetLoader（game.local 等自定义域名）
                 return assetLoader.shouldInterceptRequest(request.url)
             }
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                // 联机自检：页面加载完立刻问一句 hook 在不在
+                if (serverAddress != null) {
+                    mainHandler.postDelayed({ runHookSelfCheck() }, 800)
+                }
+            }
         }
 
         webView.webChromeClient = WebChromeClient()
@@ -169,6 +179,7 @@ class MainActivity : AppCompatActivity() {
         val host = url.host ?: return false
         if (host != "127.0.0.1" && host != "localhost") return false
         val path = url.path ?: return false
+        // 忽略查询串：loadGame 会带 ?multiplayer=1 绕缓存
         return path == INDEX_PATH || path == "/" || path.isEmpty()
     }
 
@@ -269,7 +280,6 @@ class MainActivity : AppCompatActivity() {
             WsHook.BRIDGE_NAME
         )
     }
-
     /** 用一个小浮层提示，不打断游戏（游戏是横屏全屏，Toast 也能用） */
     private fun showToastLike(message: String) {
         try {
@@ -277,6 +287,37 @@ class MainActivity : AppCompatActivity() {
         } catch (_: Exception) {
         }
     }
+
+    /**
+     * 联机自检：页面加载完成后问一句 window.__StrongholdHookInstalled。
+     *
+     * 三种结果都明确提示，避免「以为连上了其实没有」：
+     *   - installed=true  → 绿色Toast，提示已接管
+     *   - installed=false → 红色Toast，说清 hook 没进去
+     *   - 异常            → 红色Toast，说清 JS 桥没通
+     */
+    private fun runHookSelfCheck() {
+        if (isFinishing || isDestroyed) return
+        val js = "(function(){try{return String(window." + WsHook.HOOK_FLAG + "===true);}catch(e){return 'ERR:'+e.message;}})()"
+        webView.evaluateJavascript(js) { raw ->
+            val v = raw?.trim()?.trim('"') ?: "null"
+            mainHandler.post {
+                if (isFinishing || isDestroyed) return@post
+                when {
+                    v == "true" -> {
+                        showToastLike("联机已接管 → ${serverName ?: serverAddress}")
+                    }
+                    v == "false" -> {
+                        showToastLike("联机未生效：页面里没有 hook\n（当前仍为单机）")
+                    }
+                    else -> {
+                        showToastLike("联机自检异常：$v")
+                    }
+                }
+            }
+        }
+    }
+
 
     /**
      * 沉浸式全屏：内容延伸到状态栏/导航栏区域，并隐藏两者。
@@ -409,8 +450,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadGame() {
         if (webView.url?.startsWith(LOCAL_URL) == true) return
-        Log.i(TAG, "加载游戏页面: $LOCAL_URL/index.html")
-        webView.loadUrl("$LOCAL_URL/index.html")
+        // 联机模式下加一个查询串，确保 URL 唯一、绕开 WebView 缓存，
+        // 保证 shouldInterceptRequest 一定被调用（否则 hook 注不进去）
+        val suffix = if (serverAddress != null) "?multiplayer=1" else ""
+        Log.i(TAG, "加载游戏页面: $LOCAL_URL/index.html$suffix")
+        webView.loadUrl("$LOCAL_URL/index.html$suffix")
     }
 
     /** 服务没起来时的兜底提示（黑屏看门狗思路：不崩，只提示 + 重试） */
