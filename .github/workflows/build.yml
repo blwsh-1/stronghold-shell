@@ -52,9 +52,10 @@ jobs:
       - name: 版本号（启动器版本）
         id: ver
         run: |
-          # 手动触发时以输入为准；否则从 app/build.gradle.kts 读 versionName
+          # 手动触发时以输入为准；否则从 app/build.gradle.kts 读 stable 变体的 versionName
           V="${{ github.event.inputs.version }}"
           if [ -z "$V" ]; then
+            # productFlavors 里有两个 versionName，取第一个（stable 的 2.0.1）
             V=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
           fi
           V="${V:-1.0.0}"
@@ -93,21 +94,47 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew :app:assembleRelease --stacktrace --no-daemon
+        run: |
+          # 项目有两个构建变体：stable（正式）/ lab（联机实验）
+          # 同时产出两个 APK，包名不同可并存
+          ./gradlew :app:assembleStableRelease :app:assembleLabRelease --stacktrace --no-daemon
 
       - name: 收集 APK 并正式命名
         id: apk
         run: |
           V="${{ steps.ver.outputs.version }}"
           NAME="StrongholdShell-launcher-v${V}-android.apk"
+          LAB_NAME="StrongholdShell-launcher-v${V}-lab-android.apk"
           mkdir -p out
-          cp app/build/outputs/apk/release/*.apk "out/${NAME}"
+          # stable 版（正式，不含联机入口）
+          cp app/build/outputs/apk/stable/release/*.apk "out/${NAME}"
+          # lab 版（联机实验，独立包名 com.stronghold.shell.lab）
+          if ls app/build/outputs/apk/lab/release/*.apk >/dev/null 2>&1; then
+            cp app/build/outputs/apk/lab/release/*.apk "out/${LAB_NAME}"
+          fi
           ls -lh out/
           echo "name=$NAME" >> "$GITHUB_OUTPUT"
+          echo "lab_name=$LAB_NAME" >> "$GITHUB_OUTPUT"
           # 记录 SHA-256，写进 Release 说明
           SHA=$(sha256sum "out/${NAME}" | cut -d' ' -f1)
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
           echo "$NAME SHA-256: $SHA"
+          if [ -f "out/${LAB_NAME}" ]; then
+            LAB_SHA=$(sha256sum "out/${LAB_NAME}" | cut -d' ' -f1)
+            echo "lab_sha256=$LAB_SHA" >> "$GITHUB_OUTPUT"
+            echo "$LAB_NAME SHA-256: $LAB_SHA"
+          fi
+
+      - name: 对齐与签名校验
+        run: |
+          # 硬性要求：4 字节对齐 + .so 4KB 页对齐
+          ZA="${ANDROID_HOME}/build-tools/34.0.0/zipalign"
+          AS="${ANDROID_HOME}/build-tools/34.0.0/apksigner"
+          for f in out/*.apk; do
+            echo "=== $f ==="
+            "$ZA" -c -v -p 4 "$f" | tail -3 || echo "::error::zipalign 校验失败 $f"
+            "$AS" verify --verbose "$f" | head -6 || echo "::error::签名校验失败 $f"
+          done
 
       - name: 上传 APK 产物（备份）
         uses: actions/upload-artifact@v4
@@ -124,20 +151,45 @@ jobs:
           body: |
             **《卫戍协议：盟约》安卓启动器** —— 不含游戏内容的空壳，导入上游完整包即可游玩。
 
+            ## 本次包含两个 APK
+
+            | 文件 | 包名 | 说明 |
+            |---|---|---|
+            | `${{ steps.apk.outputs.name }}` | `com.stronghold.shell` | **正式版**。功能与之前一致，不含联机入口。 |
+            | `${{ steps.apk.outputs.lab_name }}` | `com.stronghold.shell.lab` | **实验版**。多一个「多人游戏」入口，可填服务器地址联机。 |
+
+            两个包名不同，**可以同时安装、互不覆盖**。实验版验证稳定后会合并进正式版。
+
             ## 怎么用
-            1. 安装本 APK（`${{ steps.apk.outputs.name }}`）
+
+            1. 安装本 APK
             2. 从上游 `sganggs/Stronghold-Protocol` 的 Releases 下载**完整包**
-               （`Stronghold-Protocol-vX.Y.Z.zip`，约 550 MB）到手机
+               （`Stronghold-Protocol-vX.Y.Z.zip`，约 550-820 MB）到手机
             3. 打开启动器 → 点「导入游戏包 (.zip)」→ 选中那个 zip
             4. 等待解压（首次几十秒）→ 点「启动游戏」
 
+            ## 联机怎么玩（仅实验版）
+
+            1. 打开实验版 → 点「🌐 多人游戏（实验）」
+            2. 点「＋ 添加服务器」，填一个地址（如 `120.77.178.254:3000`）
+            3. 朋友填**同一个地址**，你们就连到了同一个服务器
+            4. 进游戏后照常建房 / 加入房间
+
+            **素材从各自手机的本地包读取，公网只传房间同步消息**，所以流量极小。
+
             ## 为什么这样设计
+
             - 启动器**不含**任何游戏素材（美术/音频/立绘），合规且体积小
             - 游戏本体来自上游，版权归原作者与鹰角网络
-            - 以后上游更新，**不用重装启动器**，重新导入新包即可
+            - **上游更新不用重装启动器**，重新导入新包即可
+            - 联机功能与上游解耦：只改 WebSocket 连接目标，不碰游戏包
 
             ## 校验
-            - SHA-256: `${{ steps.apk.outputs.sha256 }}`
+
+            - `${{ steps.apk.outputs.name }}`
+              SHA-256: `${{ steps.apk.outputs.sha256 }}`
+            - `${{ steps.apk.outputs.lab_name }}`
+              SHA-256: `${{ steps.apk.outputs.lab_sha256 }}`
 
             > 非官方同人作品，游戏素材版权归上海鹰角网络 / Yostar，仅供学习交流、严禁盈利。
           files: out/*.apk
