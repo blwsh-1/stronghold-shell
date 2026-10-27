@@ -30,6 +30,9 @@ object WsHook {
     /** JS 桥对象名：连接失败时回调原生弹提示 */
     const val BRIDGE_NAME = "__StrongholdBridge"
 
+    /** 注入成功后置位的全局标记，供原生侧自检（window[HOOK_FLAG] === true 表示已接管） */
+    const val HOOK_FLAG = "__strongholdHookInstalled"
+
     /** 上游 WebSocket 路径，改了这里就得跟着改（见类注释） */
     private const val WS_PATH = "/ws"
 
@@ -135,6 +138,9 @@ object WsHook {
 
     // 同时挂到 globalThis（部分环境 window === globalThis，双保险）
     try { if (typeof globalThis !== 'undefined') globalThis.WebSocket = PatchedWebSocket; } catch (e) {}
+
+    // 真正挂上之后才置自检标记，原生侧据此判断是否接管成功
+    try { window.$HOOK_FLAG = true; } catch (e) {}
   } catch (e) {
     // 注入失败不阻塞游戏：单机仍然可玩
     try { console.warn('[stronghold] ws hook failed', e); } catch (e2) {}
