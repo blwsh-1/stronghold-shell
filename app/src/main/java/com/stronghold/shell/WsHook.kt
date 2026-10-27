@@ -83,6 +83,15 @@ object WsHook {
       } catch (e) { /* 桥不存在时静默 */ }
     }
 
+    function notify(event) {
+      try {
+        var b = window.$BRIDGE_NAME;
+        if (b && typeof b.onSocketEvent === 'function') {
+          b.onSocketEvent(String(event || ''));
+        }
+      } catch (e) { /* 桥不存在时静默 */ }
+    }
+
     function PatchedWebSocket(url, protocols) {
       var raw = String(url == null ? '' : url);
       var parsed = parse(raw);
@@ -105,13 +114,18 @@ object WsHook {
       if (rewritten) {
         var opened = false;
         try {
-          ws.addEventListener('open', function () { opened = true; });
+          ws.addEventListener('open', function () {
+            opened = true;
+            notify('LINK_OK');
+          });
           ws.addEventListener('error', function () {
             if (!opened) notifyFail('无法连接服务器 ' + TARGET_HOST);
           });
           ws.addEventListener('close', function (ev) {
             if (!opened && ev && ev.wasClean === false && ev.code !== 1000) {
-              notifyFail('连接被断开 ' + TARGET_HOST);
+              notifyFail('连接被断开 ' + TARGET_HOST + ' 码' + (ev.code || '?'));
+            } else if (opened) {
+              notify('LINK_CLOSED code=' + (ev && ev.code));
             }
           });
         } catch (e) { /* 事件挂不上不影响主流程 */ }
