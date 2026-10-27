@@ -155,6 +155,29 @@ object WsHook {
 
     // 真正挂上之后才置自检标记，原生侧据此判断是否接管成功
     try { window.$HOOK_FLAG = true; } catch (e) {}
+
+    // 屏幕横幅：把「hook 是否生效 / 实际连到哪」直接画出来，
+    // 不依赖 Toast（onPageFinished 可能不触发）也不依赖 logcat（被系统屏蔽）
+    try {
+      var mk = function () {
+        try {
+          if (document.getElementById('__sh_mp_badge')) return;
+          var d = document.createElement('div');
+          d.id = '__sh_mp_badge';
+          d.style.cssText = 'position:fixed;z-index:2147483647;left:8px;bottom:8px;' +
+            'padding:6px 10px;border-radius:6px;font:12px/1.4 monospace;' +
+            'background:rgba(0,229,192,.92);color:#111;pointer-events:none;' +
+            'box-shadow:0 2px 8px rgba(0,0,0,.5);max-width:70vw;word-break:break-all';
+          d.textContent = '联机已接管 → ' + TARGET_HOST;
+          (document.body || document.documentElement).appendChild(d);
+        } catch (e) {}
+      };
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', mk);
+      } else {
+        mk();
+      }
+    } catch (e) {}
   } catch (e) {
     // 注入失败不阻塞游戏：单机仍然可玩
     try { console.warn('[stronghold] ws hook failed', e); } catch (e2) {}
