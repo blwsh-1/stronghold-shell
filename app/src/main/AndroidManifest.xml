@@ -25,8 +25,7 @@
         <activity
             android:name=".ImportActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|keyboardHidden"
-            android:screenOrientation="portrait">
+            android:configChanges="orientation|screenSize|keyboardHidden">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -43,8 +42,7 @@
         <activity
             android:name=".MultiplayerActivity"
             android:exported="false"
-            android:configChanges="orientation|screenSize|keyboardHidden"
-            android:screenOrientation="portrait" />
+            android:configChanges="orientation|screenSize|keyboardHidden" />
 
         <service
             android:name=".NodeService"
