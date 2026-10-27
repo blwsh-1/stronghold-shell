@@ -171,7 +171,28 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        webView.webChromeClient = WebChromeClient()
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onConsoleMessage(msg: android.webkit.ConsoleMessage?): Boolean {
+                val m = msg ?: return true
+                val line = "[${m.messageLevel()}] ${m.message()} (${m.sourceId()}:${m.lineNumber()})"
+                Log.i(TAG, "CONSOLE $line")
+                // 联机模式下把 warn/error 直接弹出来，省得抓 logcat
+                if (serverAddress != null &&
+                    (m.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.ERROR ||
+                     m.messageLevel() == android.webkit.ConsoleMessage.MessageLevel.WARNING)
+                ) {
+                    val text = m.message()
+                    if (text.contains("net", ignoreCase = true) ||
+                        text.contains("ws", ignoreCase = true) ||
+                        text.contains("socket", ignoreCase = true) ||
+                        text.contains("connect", ignoreCase = true)
+                    ) {
+                        mainHandler.post { showToastLike("JS: " + text.take(120)) }
+                    }
+                }
+                return true
+            }
+        }
 
         // 注入 JS 桥（名字必须与前端约定一致）
         webView.addJavascriptInterface(AndroidBridge(this, webView), "AndroidNative")
@@ -284,6 +305,15 @@ class MainActivity : AppCompatActivity() {
                         if (isFinishing || isDestroyed) return@post
                         val target = serverName ?: serverAddress ?: ""
                         showToastLike("连不上 $target\n请确认对方已开服，或地址填错了")
+                    }
+                }
+
+                @android.webkit.JavascriptInterface
+                fun onSocketEvent(event: String?) {
+                    Log.i(TAG, "WebSocket 事件: $event")
+                    mainHandler.post {
+                        if (isFinishing || isDestroyed) return@post
+                        showToastLike("WS: $event")
                     }
                 }
             },
