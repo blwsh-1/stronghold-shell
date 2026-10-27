@@ -19,9 +19,40 @@ android {
         }
     }
 
+    // ===== 构建变体：stable（正式）/ lab（联机实验） =====
+    // 两个变体共用同一份源码，只有 applicationId、版本号和一个开关不同。
+    //   stable：com.stronghold.shell       2.0.1      不含多人游戏入口
+    //   lab   ：com.stronghold.shell.lab   0.1.0-lab  含多人游戏入口
+    // 包名不同 → 可以和正式版同时装在手机上，互不覆盖。
+    //
+    // 注意：flavor 名不能叫 "main"，会和默认 sourceSet 撞车（Gradle 报
+    // "Multiple entries with same key: main=[] and main=[]"）。
+    flavorDimensions += "channel"
+    productFlavors {
+        create("stable") {
+            dimension = "channel"
+            applicationId = "com.stronghold.shell"
+            versionName = "2.0.1"
+            versionCode = 3
+            buildConfigField("boolean", "ENABLE_MULTIPLAYER", "false")
+            manifestPlaceholders["appLabel"] = "卫戍协议启动器"
+        }
+        create("lab") {
+            dimension = "channel"
+            applicationId = "com.stronghold.shell.lab"
+            versionName = "0.1.0-lab"
+            versionCode = 1
+            buildConfigField("boolean", "ENABLE_MULTIPLAYER", "true")
+            manifestPlaceholders["appLabel"] = "卫戍协议启动器 Lab"
+        }
+    }
+
     // 允许不压缩 app_bundle.zip，加速打包（可选）
     androidResources {
-        noCompress += listOf("zip")
+        // zip：游戏包本身已是压缩格式，再压无意义且耗时
+        // so ：libnode.so 60MB，必须 store（不压缩），否则每次加载要先解压到内存，
+        //      启动变慢甚至 OOM。这是 AGP 8+ 的默认行为，显式声明防止将来被改回。
+        noCompress += listOf("zip", "so")
     }
 
     // ⭐ AGP 8+ 默认关闭 BuildConfig 生成，
