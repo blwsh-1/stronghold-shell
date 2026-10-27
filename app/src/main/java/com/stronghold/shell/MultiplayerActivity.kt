@@ -126,7 +126,7 @@ class MultiplayerActivity : AppCompatActivity() {
             empty.addView(
                 UiKit.label(
                     this,
-                    "点下面的「添加服务器」，填一个地址（例如 120.77.178.254:3000）。\n" +
+                    "点下面的「添加服务器」，填一个地址（例如 192.168.1.10:3000）。\n" +
                         "朋友填同一个地址，就能进同一个服务器一起玩。",
                     12f, UiKit.TEXT_SUB
                 )
@@ -221,7 +221,7 @@ class MultiplayerActivity : AppCompatActivity() {
         wrap.addView(nameInput)
 
         val addrInput = EditText(this).apply {
-            hint = "地址，例如 120.77.178.254:3000"
+            hint = "地址，例如 192.168.1.10:3000"
             setText(existing?.address ?: "")
             inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
         }
