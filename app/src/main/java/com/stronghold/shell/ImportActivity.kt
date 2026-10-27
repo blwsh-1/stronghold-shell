@@ -222,6 +222,14 @@ class ImportActivity : AppCompatActivity() {
         ib.layoutParams = cardLp()
         c.addView(ib)
 
+        // 多人游戏入口：只在 lab 版显示（主版本不暴露未完成功能）
+        if (BuildConfig.ENABLE_MULTIPLAYER) {
+            c.addView(UiKit.spacer(this, 6f))
+            val mb = UiKit.button(this, "🌐  多人游戏（实验）", false) { openMultiplayer() }
+            mb.layoutParams = cardLp()
+            c.addView(mb)
+        }
+
         val dlCard = UiKit.card(this)
         dlCard.visibility = View.GONE
         val lbl = UiKit.label(this, "", 12f, UiKit.TEXT_SUB)
@@ -760,6 +768,11 @@ class ImportActivity : AppCompatActivity() {
         }
         val it = Intent(this, MainActivity::class.java)
         startActivity(it)
+    }
+
+    /** 打开多人游戏服务器列表 */
+    private fun openMultiplayer() {
+        startActivity(Intent(this, MultiplayerActivity::class.java))
     }
 
     // ==================== 动作：下载最新包 ====================
