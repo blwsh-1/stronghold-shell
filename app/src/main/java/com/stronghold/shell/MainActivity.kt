@@ -43,12 +43,31 @@ class MainActivity : AppCompatActivity() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val io = Executors.newSingleThreadExecutor()
 
+    /** 联机模式：远端服务器地址；null 表示单机模式 */
+    private var serverAddress: String? = null
+    /** 联机模式：服务器显示名，仅用于提示 */
+    private var serverName: String? = null
+    /** 已注入过 hook 的页面 URL，避免重复插入 */
+    private val hookedUrls = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
     companion object {
         private const val TAG = "StrongholdShell"
         const val LOCAL_URL = "http://127.0.0.1:3000"
         const val HEALTH_URL = "$LOCAL_URL/healthz"
         const val ACTION_SERVER_STATE = "com.stronghold.shell.SERVER_STATE"
         const val EXTRA_SERVER_READY = "server_ready"
+
+        /**
+         * 联机模式：远端服务器地址（"host:port"）。
+         * 有值时本页会 hook WebSocket，把 /ws 连接改写到远端；
+         * 页面与素材仍然由手机内的 Node 在 127.0.0.1:3000 提供。
+         */
+        const val EXTRA_SERVER_ADDRESS = "server_address"
+        /** 联机模式下用于界面提示的服务器名 */
+        const val EXTRA_SERVER_NAME = "server_name"
+
+        /** 需要注入 hook 的入口页面（唯一一个会插入脚本的路径） */
+        private const val INDEX_PATH = "/index.html"
     }
 
     /** 服务状态广播接收器：服务就绪后加载页面 */
@@ -62,6 +81,11 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // 0) 读取联机参数。有地址 = 联机模式，无地址 = 单机（行为完全不变）
+        serverAddress = intent.getStringExtra(EXTRA_SERVER_ADDRESS)?.takeIf { it.isNotBlank() }
+        serverName = intent.getStringExtra(EXTRA_SERVER_NAME)
+        Log.i(TAG, "启动模式: " + if (serverAddress == null) "单机" else "联机 -> $serverAddress")
 
         // 1) 仅在「没有导入游戏包」时，才回退解压 assets 内置资源
         //    （启动器模式：用户导入的包在 GamePack.activeDir，不需要这步）
@@ -81,6 +105,8 @@ class MainActivity : AppCompatActivity() {
 
         // 2.5) 沉浸式全屏：隐藏状态栏 + 导航栏，滑动才临时唤出（需在 setContentView 之后）
         setupImmersiveMode()
+        // 2.6) 联机模式：挂 JS 桥（单机不挂，行为与旧版完全一致）
+        installBridgeIfNeeded()
 
         // 3) 注册服务状态广播
         registerReceiverCompat()
@@ -116,6 +142,11 @@ class MainActivity : AppCompatActivity() {
                 view: WebView,
                 request: WebResourceRequest
             ): WebResourceResponse? {
+                // 1) 联机模式下拦截入口页面，把 WebSocket hook 插到 <head> 最前面
+                if (serverAddress != null && isIndexRequest(request.url)) {
+                    injectIntoIndex(request.url)?.let { return it }
+                }
+                // 2) 其余交给 assetLoader（game.local 等自定义域名）
                 return assetLoader.shouldInterceptRequest(request.url)
             }
         }
@@ -128,6 +159,123 @@ class MainActivity : AppCompatActivity() {
         // 长按禁用（游戏内不需要）
         webView.isLongClickable = false
         webView.setOnLongClickListener { true }
+    }
+
+    /**
+     * 判断这是不是需要注入的入口页面请求。
+     * 只认本机 Node 上的 /index.html（含根路径），其它一律不碰。
+     */
+    private fun isIndexRequest(url: android.net.Uri): Boolean {
+        val host = url.host ?: return false
+        if (host != "127.0.0.1" && host != "localhost") return false
+        val path = url.path ?: return false
+        return path == INDEX_PATH || path == "/" || path.isEmpty()
+    }
+
+    /**
+     * 从本机 Node 取回 index.html，把 WebSocket hook 插到 <head> 之后返回。
+     *
+     * 为什么不用 onPageStarted：那是异步投递的，页面里的内联脚本可能先跑，
+     * 导致上游在 hook 生效前就把 WebSocket 取了引用。在 HTML 里插入 <script>
+     * 能保证 hook 严格先于页面上任何脚本执行。
+     *
+     * 任何异常都返回 null → 退回原生加载，最坏情况是联机不生效但游戏能开。
+     */
+    private fun injectIntoIndex(url: android.net.Uri): WebResourceResponse? {
+        val addr = serverAddress ?: return null
+        val key = url.toString()
+        if (!hookedUrls.add(key)) {
+            // 已经注入过（页面刷新/重进），仍要注入，只是记一笔日志
+            Log.i(TAG, "重复注入 hook: $key")
+        }
+        return try {
+            val conn = URL(url.toString()).openConnection() as HttpURLConnection
+            conn.connectTimeout = 3000
+            conn.readTimeout = 5000
+            conn.requestMethod = "GET"
+            val code = conn.responseCode
+            if (code !in 200..299) {
+                conn.disconnect()
+                Log.w(TAG, "取 index.html 失败: HTTP $code")
+                return null
+            }
+            val html = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+            conn.disconnect()
+
+            val script = "<script>" + WsHook.build(addr) + "</script>"
+            val patched = insertIntoHead(html, script)
+            if (patched == null) {
+                Log.w(TAG, "index.html 里找不到 <head>，改用 onPageStarted 兜底")
+                return null
+            }
+            Log.i(TAG, "已注入 WebSocket hook -> $addr")
+            WebResourceResponse(
+                "text/html",
+                "UTF-8",
+                200,
+                "OK",
+                mapOf(
+                    "Cache-Control" to "no-store",
+                    "Pragma" to "no-cache"
+                ),
+                patched.toByteArray(Charsets.UTF_8).inputStream()
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "注入失败: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 把脚本插到 <head> 标签之后（大小写不敏感）。
+     * 找不到 <head> 时退而插入到 <html> 之后；都没有就返回 null。
+     */
+    private fun insertIntoHead(html: String, script: String): String? {
+        val headRegex = Regex("<head\\b[^>]*>", RegexOption.IGNORE_CASE)
+        val m = headRegex.find(html)
+        if (m != null) {
+            val at = m.range.last + 1
+            return html.substring(0, at) + script + html.substring(at)
+        }
+        val htmlRegex = Regex("<html\\b[^>]*>", RegexOption.IGNORE_CASE)
+        val m2 = htmlRegex.find(html)
+        if (m2 != null) {
+            val at = m2.range.last + 1
+            return html.substring(0, at) + script + html.substring(at)
+        }
+        // 连 <html> 都没有（极少数情况）：直接放最前面
+        return script + html
+    }
+
+    /**
+     * 联机模式下挂一个 JS 桥，用于连接失败时给用户明确提示。
+     * 只暴露一个无参回调，且只在联机模式挂载；单机完全不挂。
+     */
+    @SuppressLint("JavascriptInterface")
+    private fun installBridgeIfNeeded() {
+        if (serverAddress == null) return
+        webView.addJavascriptInterface(
+            object {
+                @android.webkit.JavascriptInterface
+                fun onConnectionFailed(reason: String?) {
+                    Log.w(TAG, "WebSocket 连接失败: $reason")
+                    mainHandler.post {
+                        if (isFinishing || isDestroyed) return@post
+                        val target = serverName ?: serverAddress ?: ""
+                        showToastLike("连不上 $target\n请确认对方已开服，或地址填错了")
+                    }
+                }
+            },
+            WsHook.BRIDGE_NAME
+        )
+    }
+
+    /** 用一个小浮层提示，不打断游戏（游戏是横屏全屏，Toast 也能用） */
+    private fun showToastLike(message: String) {
+        try {
+            android.widget.Toast.makeText(this, message, android.widget.Toast.LENGTH_LONG).show()
+        } catch (_: Exception) {
+        }
     }
 
     /**
