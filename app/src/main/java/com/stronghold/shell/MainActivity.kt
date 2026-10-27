@@ -119,6 +119,13 @@ class MainActivity : AppCompatActivity() {
 
         // 5) 轮询健康检查（服务可能比 UI 慢）
         pollHealthAndLoad()
+
+        // 6) 联机自检兜底：onPageFinished 不一定会触发（重定向/缓存命中时会被跳过），
+        //    所以改用固定延时轮询，确保诊断一定跑起来
+        if (serverAddress != null) {
+            mainHandler.postDelayed({ runHookSelfCheck() }, 6000)
+            mainHandler.postDelayed({ runHookSelfCheck() }, 15000)
+        }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -338,27 +345,50 @@ class MainActivity : AppCompatActivity() {
      */
     private fun runHookSelfCheck() {
         if (isFinishing || isDestroyed) return
-        // 只弹一次：onPageFinished 可能因为重定向/子页面触发多次
-        if (hookCheckDone) return
-        hookCheckDone = true
         val js = "(function(){try{return String(window." + WsHook.HOOK_FLAG + "===true);}catch(e){return 'ERR:'+e.message;}})()"
         webView.evaluateJavascript(js) { raw ->
             val v = raw?.trim()?.trim('"') ?: "null"
             mainHandler.post {
                 if (isFinishing || isDestroyed) return@post
-                when {
-                    v == "true" -> {
-                        showToastLike("联机已接管 → ${serverName ?: serverAddress}")
-                    }
-                    v == "false" -> {
-                        showToastLike("联机未生效：页面里没有 hook\n（当前仍为单机）")
-                    }
-                    else -> {
-                        showToastLike("联机自检异常：$v")
-                    }
+                // 结果同步画到页面上（Toast 只弹一次，屏幕上持续可见）
+                val msg = when {
+                    v == "true" -> "联机已接管 → ${serverName ?: serverAddress}"
+                    v == "false" -> "联机未生效（仍是单机）"
+                    else -> "自检异常：$v"
+                }
+                webView.evaluateJavascript(
+                    "(function(){try{var d=document.getElementById('__sh_diag');" +
+                        "if(!d){d=document.createElement('div');d.id='__sh_diag';" +
+                        "d.style.cssText='position:fixed;z-index:2147483647;left:8px;top:8px;" +
+                        "padding:6px 10px;border-radius:6px;font:12px/1.4 monospace;" +
+                        "background:rgba(0,0,0,.85);color:#0f0;pointer-events:none;" +
+                        "box-shadow:0 2px 8px rgba(0,0,0,.5)';" +
+                        "(document.body||document.documentElement).appendChild(d);}" +
+                        "d.textContent=${jsLiteralForJs(msg)};}catch(e){}})()",
+                    null
+                )
+                if (!hookCheckDone) {
+                    hookCheckDone = true
+                    showToastLike(msg)
                 }
             }
         }
+    }
+
+    /** 把 Kotlin 字符串转成可安全嵌入 JS 的字面量（含引号） */
+    private fun jsLiteralForJs(s: String): String {
+        val sb = StringBuilder("'")
+        for (c in s) {
+            when (c) {
+                '\\' -> sb.append("\\\\")
+                '\'' -> sb.append("\\'")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '<' -> sb.append("\\x3c")
+                else -> sb.append(c)
+            }
+        }
+        return sb.append("'").toString()
     }
 
 
