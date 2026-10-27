@@ -50,6 +50,9 @@ class MainActivity : AppCompatActivity() {
     /** 已注入过 hook 的页面 URL，避免重复插入 */
     private val hookedUrls = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
+    /** 联机自检是否已执行过（onPageFinished 会多次触发，只弹一次提示） */
+    private var hookCheckDone = false
+
     companion object {
         private const val TAG = "StrongholdShell"
         const val LOCAL_URL = "http://127.0.0.1:3000"
@@ -127,6 +130,13 @@ class MainActivity : AppCompatActivity() {
         settings.allowFileAccess = true
         settings.allowContentAccess = true
         settings.mediaPlaybackRequiresUserGesture = false
+        // 联机模式关键：WebView 混合内容策略。
+        // 页面来自 http://127.0.0.1（被视为安全上下文），联机时 WebSocket 要连
+        // ws://公网IP（明文），默认会被 WebView 当作混合内容静默拦截 —— 表现就是
+        // 服务器一条连接都收不到。这里在联机模式下显式放开。
+        if (serverAddress != null) {
+            settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+        }
         // 联机模式下必须绕开缓存：否则 index.html 可能直接来自缓存，
         // shouldInterceptRequest 不触发 → hook 注不进去（这是联机失效的头号原因）
         settings.cacheMode = if (serverAddress != null) WebSettings.LOAD_NO_CACHE
@@ -298,6 +308,9 @@ class MainActivity : AppCompatActivity() {
      */
     private fun runHookSelfCheck() {
         if (isFinishing || isDestroyed) return
+        // 只弹一次：onPageFinished 可能因为重定向/子页面触发多次
+        if (hookCheckDone) return
+        hookCheckDone = true
         val js = "(function(){try{return String(window." + WsHook.HOOK_FLAG + "===true);}catch(e){return 'ERR:'+e.message;}})()"
         webView.evaluateJavascript(js) { raw ->
             val v = raw?.trim()?.trim('"') ?: "null"
