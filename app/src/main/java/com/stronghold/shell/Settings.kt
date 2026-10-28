@@ -27,8 +27,11 @@ object Settings {
         var verifyMode: String = "off",        // off / sample / all
         var pluginScripts: String = "off",     // off / sandbox
         var noBrowser: Boolean = true,         // 手机上无意义，保留
-        var autoCheckUpdate: Boolean = true,   // 启动时自动查更新
-        var lastKnownLatest: String = ""       // 上次查到的最新版本
+        // --- 自动检查更新：拆成两个独立开关，互不影响 ---
+        var autoCheckPack: Boolean = true,     // 启动时自动查「游戏包」更新（上游 GitHub Release）
+        var autoCheckApp: Boolean = true,      // 启动时自动查「启动器自身」更新（本项目 Release）
+        var lastKnownLatest: String = "",      // 上次查到的游戏包最新版本
+        var lastKnownAppVersion: String = ""   // 上次查到的启动器最新版本
     )
 
     private fun file(context: Context): File {
@@ -49,8 +52,11 @@ object Settings {
                 verifyMode = j.optString("verifyMode", "off"),
                 pluginScripts = j.optString("pluginScripts", "off"),
                 noBrowser = j.optBoolean("noBrowser", true),
-                autoCheckUpdate = j.optBoolean("autoCheckUpdate", true),
-                lastKnownLatest = j.optString("lastKnownLatest", "")
+                // 老配置里可能只有 autoCheckUpdate，兼容迁移：两边都继承旧值
+                autoCheckPack = j.optBoolean("autoCheckPack", j.optBoolean("autoCheckUpdate", true)),
+                autoCheckApp = j.optBoolean("autoCheckApp", j.optBoolean("autoCheckUpdate", true)),
+                lastKnownLatest = j.optString("lastKnownLatest", ""),
+                lastKnownAppVersion = j.optString("lastKnownAppVersion", "")
             )
         } catch (e: Exception) {
             Log.w(TAG, "读设置失败: ${e.message}")
@@ -67,8 +73,10 @@ object Settings {
                 put("verifyMode", p.verifyMode)
                 put("pluginScripts", p.pluginScripts)
                 put("noBrowser", p.noBrowser)
-                put("autoCheckUpdate", p.autoCheckUpdate)
+                put("autoCheckPack", p.autoCheckPack)
+                put("autoCheckApp", p.autoCheckApp)
                 put("lastKnownLatest", p.lastKnownLatest)
+                put("lastKnownAppVersion", p.lastKnownAppVersion)
             }
             file(context).writeText(j.toString(2))
             true
