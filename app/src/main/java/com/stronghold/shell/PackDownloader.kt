@@ -49,13 +49,37 @@ object PackDownloader {
      */
     private val switchRequested = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    /** 用户指定的目标通道（null = 不加指定，按原顺序往后轮） */
+    @Volatile
+    private var switchTarget: Pair<String, String>? = null
+
     /** 当前正在用的连接，换源时直接断开它，避免卡在建连/读响应头阶段换不走 */
     @Volatile
     private var activeConn: java.net.HttpURLConnection? = null
 
+    /** 最近一次抢跑/体检得到的通道状态，供下载中弹窗展示 */
+    @Volatile
+    var lastProbeResult: List<Probe> = emptyList()
+        private set
+
+    fun rememberProbe(r: List<Probe>) {
+        lastProbeResult = r
+    }
+
+    /** 换到下一个（不指定） */
     fun requestSwitchMirror() {
+        switchTarget = null
         switchRequested.set(true)
-        // 主动断开当前连接：如果正卡在 connect() 或读响应头，光靠标记是换不动的
+        try {
+            activeConn?.disconnect()
+        } catch (_: Exception) {
+        }
+    }
+
+    /** 换到指定通道 */
+    fun requestSwitchMirrorTo(prefix: String, name: String) {
+        switchTarget = prefix to name
+        switchRequested.set(true)
         try {
             activeConn?.disconnect()
         } catch (_: Exception) {
@@ -64,6 +88,13 @@ object PackDownloader {
 
     /** 供 tryDownloadOnce 检查：返回 true 表示外部要求换源 */
     private fun consumeSwitchRequest(): Boolean = switchRequested.getAndSet(false)
+
+    /** 取出并清空用户指定的目标通道 */
+    private fun takeSwitchTarget(): Pair<String, String>? {
+        val t = switchTarget
+        switchTarget = null
+        return t
+    }
 
     /** 一轮下载内最多尝试的镜像数 */
     private const val MIRRORS_PER_ROUND = 4
@@ -379,6 +410,16 @@ object PackDownloader {
                     return true
                 }
                 if (onCancel()) return false
+                // 用户指定了要换到某个通道：直接跳到它在 order 里的位置
+                val target = takeSwitchTarget()
+                if (target != null) {
+                    val idx = order.indexOfFirst { it.first == target.first }
+                    if (idx >= 0) {
+                        cursor = idx
+                        tried = 0      // 重置本轮配额，让指定通道有机会被尝试
+                        Log.i(TAG, "按用户指定切换到：${target.second}")
+                    }
+                }
             }
             // 本轮镜像用完，回到队首继续下一轮（这时已下的字节还在）
             cursor = 0
