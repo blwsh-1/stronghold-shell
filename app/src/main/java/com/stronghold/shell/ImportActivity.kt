@@ -222,7 +222,7 @@ class ImportActivity : AppCompatActivity() {
             c.addView(lb)
         }
 
-        val db = UiKit.button(this, "⬇  下载最新完整包", false) { onDownloadLatest() }
+        val db = UiKit.button(this, "⬇  下载 / 更新", false) { onDownloadLatest() }
         db.layoutParams = cardLp()
         c.addView(db)
 
@@ -271,7 +271,7 @@ class ImportActivity : AppCompatActivity() {
             up.addView(row)
             up.addView(UiKit.spacer(this, 6f))
             up.addView(UiKit.label(
-                this, "当前 v${current.version}，最新 v${info.version}。点上方「下载最新完整包」升级。",
+                this, "当前 v${current.version}，最新 v${info.version}。点上方「下载 / 更新」，可选增量更新或完整包。",
                 12f, UiKit.TEXT_SUB
             ))
             c.addView(up, cardLp())
@@ -713,10 +713,92 @@ class ImportActivity : AppCompatActivity() {
         }
         pickPackZip.launch(i)
     }
-    /** 导入本地游戏包 zip（后台解压 → 注册版本） */
+    /**
+     * 导入本地 zip —— 自动区分「完整包」与「增量包」。
+     *
+     * 【为什么要分流】原逻辑把任何含 package.json + server/ 的 zip 都当完整包注册成
+     * 新版本，而 -update.zip 恰好两者都有 → 注册出一个没有 node_modules 的残缺版本
+     * → 点启动必崩。现在先探测包类型再决定走哪条路。
+     */
     private fun doInstallPack(uri: Uri) {
-        toast("正在导入，请勿退出…")
+        toast("正在检查包…")
         io.execute {
+            val kind = PackUpdater.detect(this@ImportActivity, uri)
+
+            // ---------- 增量包 → 覆盖到已装版本上 ----------
+            if (kind == PackUpdater.ZipKind.UPDATE) {
+                val active = PackManager.activeDir(this@ImportActivity)
+                if (active == null) {
+                    ui.post { toast("这是增量包，本地还没有完整安装；请先导入完整包") }
+                    return@execute
+                }
+                if (!File(active, "node_modules").isDirectory) {
+                    ui.post { toast("当前版本不完整（缺 node_modules），请先导入完整包") }
+                    return@execute
+                }
+                val from = PackManager.readVersionFrom(active) ?: "未知"
+
+                val latch = java.util.concurrent.CountDownLatch(1)
+                var go = false
+                ui.post {
+                    AlertDialog.Builder(this@ImportActivity)
+                        .setTitle("检测到增量包")
+                        .setMessage(
+                            "本地当前：v$from\n\n" +
+                                "增量包只含改动的文件，会覆盖到 v$from 上。\n" +
+                                "覆盖前自动备份，按 UPDATE.json 校验 from 与 sha256，失败自动回滚。\n\n" +
+                                "⚠️ 只适用于紧邻的上一版；不匹配会被直接拒绝（不动任何文件）。\n" +
+                                "跨版本请用「下载最新」，它会自动逐级升。"
+                        )
+                        .setPositiveButton("开始覆盖") { _, _ -> go = true; latch.countDown() }
+                        .setNegativeButton("取消") { _, _ -> latch.countDown() }
+                        .setOnCancelListener { latch.countDown() }
+                        .show()
+                }
+                latch.await()
+                if (!go) return@execute
+
+                ui.post { toast("正在覆盖，请勿退出…") }
+                val r = PackUpdater.applyOverlay(this@ImportActivity, uri) { stage ->
+                    ui.post { toast(stage) }
+                }
+                ui.post {
+                    if (r.ok) {
+                        toast("增量升级完成：v${r.toVersion}")
+                        updateInfo = null
+                        switchNav(NAV_HOME)
+                    } else {
+                        AlertDialog.Builder(this@ImportActivity)
+                            .setTitle("增量升级失败")
+                            .setMessage(
+                                r.message + "\n\n已回滚到 v${r.fromVersion ?: "原版本"}。\n" +
+                                    "跨版本请改用完整包或「下载最新」。"
+                            )
+                            .setPositiveButton("知道了", null)
+                            .show()
+                    }
+                }
+                return@execute
+            }
+
+            // ---------- 精简包 / 源码包 → 明确拒绝 ----------
+            if (kind == PackUpdater.ZipKind.UNKNOWN) {
+                ui.post {
+                    AlertDialog.Builder(this@ImportActivity)
+                        .setTitle("这不是可用的游戏包")
+                        .setMessage(
+                            "包里既没有 node_modules（完整包），\n" +
+                                "也没有 UPDATE.json（增量包）。\n\n" +
+                                "多半是 lite 精简包或源码包，请换完整包。"
+                        )
+                        .setPositiveButton("知道了", null)
+                        .show()
+                }
+                return@execute
+            }
+
+            // ---------- 完整包 → 原逻辑 ----------
+            toast("正在导入，请勿退出…")
             var tmp: File? = null
             try {
                 val root = PackManager.packsRoot(this@ImportActivity)
@@ -733,6 +815,10 @@ class ImportActivity : AppCompatActivity() {
                 val version = PackManager.readVersionFrom(gameDir)
                 if (version == null) {
                     ui.post { toast("不是有效的游戏包（缺少 package.json）") }
+                    return@execute
+                }
+                if (!File(gameDir, "node_modules").isDirectory) {
+                    ui.post { toast("缺 node_modules，请用完整包而非 lite/源码包") }
                     return@execute
                 }
                 if (!File(gameDir, "server").exists() && !File(gameDir, "index.js").exists()) {
@@ -834,36 +920,176 @@ class ImportActivity : AppCompatActivity() {
             toast("正在下载中…")
             return
         }
-        val info = updateInfo
-        if (info == null) {
-            toast("正在查询最新版本…")
-            checkUpdate(silent = false, thenDownload = true)
+        // 空机：没有本地版本，只能下完整包
+        if (PackManager.activeId(this) == null) {
+            startFullDownload()
             return
         }
-        proceedDownload(info)
+        // 有本地版本：把「增量更新」和「下载完整包」两个选择都摆出来
+        showUpdateChoice()
     }
 
     /**
-     * 决定下哪种包：
-     *  - 本地没有这个版本  -> 完整包
-     *  - 本地已有这个版本  -> 生成增量升级清单（13MB 级），升级失败可回退完整包
+     * 更新方式选择：一次网络请求同时拿到「增量计划」和「完整包大小」，两条路都给用户。
+     *
+     * 【两种方式的本质区别】
+     *   增量更新 —— 逐级下载 -update.zip，覆盖进现有版本目录。只下改动文件
+     *              （876 KB ~ 几十 MB），mod / 素材 / 存档都保留；
+     *              受 UPDATE.json 的 from 约束，必须一级一级升。
+     *   完整包   —— 下 800MB 级整包，解压成一个**新的**版本目录，旧版本原样保留，
+     *              可在「游戏版本」列表里随时切换；不受 from 约束，跳几个版本都行。
      */
-    private fun proceedDownload(info: UpdateChecker.ReleaseInfo) {
-        val packs = PackManager.listPacks(this)
-        val same = packs.firstOrNull { it.version == info.version }
-        if (same == null) {
-            val asset = UpdateChecker.pickAsset(info, UpdateChecker.PackKind.FULL)
-            if (asset == null) {
-                toast("该版本没有可下载的完整包")
-                return
+    private fun showUpdateChoice() {
+        toast("正在查询版本列表…")
+        io.execute {
+            val releases = SteppedUpdater.fetchAll()
+            if (releases == null) {
+                ui.post { toast("查询失败，请检查网络后重试") }
+                return@execute
             }
-            preferredKind = UpdateChecker.PackKind.FULL
-            confirmDownload(info, asset)
+            val active = PackManager.activeDir(this@ImportActivity)
+            val cur = active?.let { PackManager.readVersionFrom(it) } ?: ""
+            val plan = if (cur.isEmpty()) SteppedUpdater.Plan(emptyList(), null)
+            else SteppedUpdater.plan(cur, releases)
+            val steps = plan.steps
+
+            // 最新一版：按版本号取最大，不依赖列表顺序
+            val latest = releases.maxWithOrNull { a, b ->
+                when {
+                    UpdateChecker.isNewer(a.version, b.version) -> 1
+                    UpdateChecker.isNewer(b.version, a.version) -> -1
+                    else -> 0
+                }
+            }
+            val fullAsset = latest?.let { UpdateChecker.pickAsset(it, UpdateChecker.PackKind.FULL) }
+
+            ui.post {
+                val rel = latest ?: run {
+                    toast("没有可用的版本信息")
+                    return@post
+                }
+                val full = fullAsset
+                val canIncremental = steps.isNotEmpty()
+                val totalMb = steps.sumOf { if (it.asset.sizeBytes > 0) it.asset.sizeMb else 0.0 }
+
+                val msg = buildString {
+                    append("当前版本：v").append(if (cur.isEmpty()) "未知" else cur).append("\n\n")
+
+                    if (canIncremental) {
+                        append("① 增量更新（推荐）\n")
+                        append("   ").append(steps.joinToString(" → ") { "v${it.to}" })
+                        append("，共 ").append(steps.size).append(" 步，下载约 ")
+                        append("%.1f MB\n".format(totalMb))
+                        append("   覆盖进现有版本，mod / 素材 / 存档保留；\n")
+                        append("   每步校验 sha256，失败自动回滚\n")
+                        if (plan.blockedAt != null) {
+                            append("   ⚠️ v").append(plan.blockedAt)
+                                .append(" 没有发布增量包，只能先升到 v").append(steps.last().to).append("\n")
+                        }
+                        append("\n")
+                    } else if (plan.blockedAt != null) {
+                        append("① 增量更新：不可用（v").append(plan.blockedAt).append(" 没有发布增量包）\n\n")
+                    } else {
+                        append("① 增量更新：当前已是最新版本，无需进行\n\n")
+                    }
+
+                    if (full != null) {
+                        append("② 下载完整包\n")
+                        append("   v").append(rel.version)
+                        if (full.sizeBytes > 0) append("，约 %.1f MB".format(full.sizeMb))
+                        append("\n")
+                        append("   解压成新的版本目录，旧版本保留、可随时切换；跳几个版本都能用\n")
+                    } else {
+                        append("② 下载完整包：该版本没有完整包")
+                    }
+                }
+
+                val b = AlertDialog.Builder(this@ImportActivity)
+                    .setTitle("更新到 v${rel.version}")
+                    .setMessage(msg)
+                    .setNegativeButton("取消", null)
+
+                if (canIncremental) {
+                    b.setPositiveButton("增量更新（%.1f MB）".format(totalMb)) { _, _ -> runStepped() }
+                } else if (full != null) {
+                    b.setPositiveButton("下载完整包") { _, _ -> confirmDownload(rel, full) }
+                }
+                if (canIncremental && full != null) {
+                    b.setNeutralButton(
+                        if (full.sizeBytes > 0) "完整包（%.1f MB）".format(full.sizeMb)
+                        else "下载完整包"
+                    ) { _, _ -> confirmDownload(rel, full) }
+                }
+                b.show()
+            }
+        }
+    }
+
+    /** 只走完整包：空机首装，或用户明确选整包 */
+    private fun startFullDownload() {
+        val info = updateInfo
+        if (info != null) {
+            proceedDownload(info)
             return
         }
-        // 已装同版本 -> 走增量更新
-        preferredKind = UpdateChecker.PackKind.UPDATE
-        confirmIncremental(info, same)
+        toast("正在查询最新版本…")
+        io.execute {
+            val i = UpdateChecker.fetchLatest()
+            ui.post {
+                if (i == null) {
+                    toast("查询失败，请检查网络后重试")
+                } else {
+                    updateInfo = i
+                    proceedDownload(i)
+                }
+            }
+        }
+    }
+
+    /** 真正跑升级链（下载 -> 覆盖 -> 下一级） */
+    private fun runStepped() {
+        downloading = true
+        downloadCard?.visibility = View.VISIBLE
+        downloadLabel?.text = "准备升级…"
+
+        io.execute {
+            val r = SteppedUpdater.run(this@ImportActivity) { s ->
+                ui.post { downloadLabel?.text = s }
+            }
+            downloading = false
+            ui.post {
+                downloadCard?.visibility = View.GONE
+                updateInfo = null
+                if (r.ok) {
+                    toast(r.message)
+                    switchNav(NAV_HOME)
+                } else {
+                    AlertDialog.Builder(this@ImportActivity)
+                        .setTitle("升级未完成")
+                        .setMessage(r.message)
+                        .setPositiveButton("知道了") { _, _ -> switchNav(NAV_HOME) }
+                        .show()
+                }
+            }
+        }
+    }
+
+    /**
+     * 本地没有版本时下完整包。
+     *
+     * 【改动说明】原来这里判断「本地已有同版本才走增量」（it.version == info.version），
+     * 导致本地 0.3.2 + 远程 0.3.3 时 same == null，永远去下 821MB 完整包。
+     * 现在有本地版本的情况统一交给 showUpdateChoice()（增量 / 完整包二选一），
+     * 这里只负责空机首装和「用户明确选了完整包」的下载。
+     */
+    private fun proceedDownload(info: UpdateChecker.ReleaseInfo) {
+        val asset = UpdateChecker.pickAsset(info, UpdateChecker.PackKind.FULL)
+        if (asset == null) {
+            toast("该版本没有可下载的完整包")
+            return
+        }
+        preferredKind = UpdateChecker.PackKind.FULL
+        confirmDownload(info, asset)
     }
 
     private fun confirmDownload(info: UpdateChecker.ReleaseInfo, asset: UpdateChecker.Asset) {
@@ -1192,8 +1418,8 @@ class ImportActivity : AppCompatActivity() {
                 preferredMirrors = preferredMirrors
             )
 
-            dest.delete()
             if (!ok) {
+                dest.delete()
                 downloading = false
                 ui.post {
                     downloadCard?.visibility = View.GONE
@@ -1202,56 +1428,31 @@ class ImportActivity : AppCompatActivity() {
                 return@execute
             }
 
-            // ---- 备份 -> 覆盖解压 -> 版本校验 ----
-            val backup = File(same.dir.parentFile, same.dir.name + ".bak")
-            var backupMade = false
-            try {
-                ui.post { downloadLabel?.text = "正在应用增量补丁…" }
-                backup.deleteRecursively()
-                backupMade = same.dir.renameTo(backup)
-                if (!backupMade) {
-                    FileLogger.log("警告：旧包备份失败，直接在原目录覆盖")
-                }
-                val target = same.dir
-                if (backupMade) target.mkdirs()
-                ZipInstaller.extractFile(dest, target)
+            // ---- 应用补丁：剥包裹 / 备份 / 覆盖 / 删清单 / 校验 / 回滚 全交给 PackUpdater ----
+            ui.post { downloadLabel?.text = "正在应用增量补丁…" }
+            val r = PackUpdater.applyOverlayFile(
+                this@ImportActivity, dest, targetId = same.id
+            ) { stage -> ui.post { downloadLabel?.text = stage } }
+            dest.delete()
+            downloading = false
 
-                val newVer = PackManager.readVersionFrom(target)
-                FileLogger.log("增量升级完成：期望 ${info.version}，实际读取 $newVer")
-
-                if (newVer == null || !newVer.contains(info.version.removePrefix("v"))) {
-                    throw IllegalStateException(
-                        "增量包应用后版本号不符（读到 " + (newVer ?: "无") + "），请改用完整包"
-                    )
-                }
-
-                backup.deleteRecursively()
-                PackManager.register(
-                    this@ImportActivity, target, newVer, source = "github", setActive = true
-                )
-                downloading = false
+            if (r.ok) {
+                val newVer = r.toVersion ?: "unknown"
+                FileLogger.log("增量升级完成：${r.fromVersion} -> $newVer")
                 ui.post {
                     downloadCard?.visibility = View.GONE
                     toast("增量升级完成：v$newVer")
                     updateInfo = null
                     switchNav(NAV_HOME)
                 }
-            } catch (e: Exception) {
-                FileLogger.log("增量升级失败：" + e.message)
-                try {
-                    if (backupMade) {
-                        same.dir.deleteRecursively()
-                        backup.renameTo(same.dir)
-                    }
-                } catch (_: Exception) {
-                }
-                downloading = false
-                val reason = e.message ?: "未知错误"
+            } else {
+                val reason = r.message
+                FileLogger.log("增量升级失败：" + reason)
                 ui.post {
                     downloadCard?.visibility = View.GONE
                     AlertDialog.Builder(this@ImportActivity)
                         .setTitle("增量升级失败")
-                        .setMessage(reason + "\n\n" + "已回滚到原版本，可以改用完整包重试。")
+                        .setMessage(reason + "\n\n已回滚到原版本，可以改用完整包重试。")
                         .setPositiveButton("用完整包") { _, _ ->
                             val full = UpdateChecker.pickAsset(info, UpdateChecker.PackKind.FULL)
                             preferredKind = UpdateChecker.PackKind.FULL
@@ -1948,8 +2149,12 @@ class ImportActivity : AppCompatActivity() {
                 }
 
                 if (thenDownload) {
-                    // 统一走 proceedDownload：已装同版本会自动转成增量升级
-                    proceedDownload(info)
+                    // 有本地版本 -> 增量 / 完整包二选一；空机 -> 完整包
+                    if (PackManager.activeId(this@ImportActivity) != null) {
+                        showUpdateChoice()
+                    } else {
+                        proceedDownload(info)
+                    }
                     return@post
                 }
 
