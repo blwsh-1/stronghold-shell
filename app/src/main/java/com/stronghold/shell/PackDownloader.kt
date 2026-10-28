@@ -440,11 +440,60 @@ object PackDownloader {
         return ".../$name"
     }
 
-    /** 下载目录：优先外部私有目录（不进 /sdcard 媒体库，卸载可清） */
+    /**
+     * 下载目录。
+     *
+     * 支持三种模式（存在 Settings.downloadMode 里）：
+     *   0 = 内部私有（默认，最稳，但文件管理器看不见）
+     *   1 = 公共 Download/StrongholdPacks（文件管理器可见，方便手动分享）
+     *   2 = 自定义路径（用户在设置里填的绝对路径）
+     *
+     * 若目标目录建不出来（权限不足 / 路径非法），自动回落到内部私有目录，
+     * 保证功能不会因为路径选错而彻底不可用。
+     */
     fun downloadDir(context: Context): File {
+        val p = try {
+            Settings.load(context)
+        } catch (_: Exception) {
+            null
+        }
+        val mode = p?.downloadMode ?: 0
+        val custom = p?.downloadPath ?: ""
+        val candidate: File? = when (mode) {
+            1 -> File(android.os.Environment.getExternalStoragePublicDirectory(
+                android.os.Environment.DIRECTORY_DOWNLOAD), "StrongholdPacks")
+            2 -> if (custom.isNotBlank()) File(custom) else null
+            else -> null
+        }
+        if (candidate != null) {
+            try {
+                if (!candidate.exists()) candidate.mkdirs()
+                if (candidate.isDirectory && candidate.canWrite()) return candidate
+                Log.w(TAG, "自定义下载目录不可写，回落内部目录: " + candidate.absolutePath)
+            } catch (e: Exception) {
+                Log.w(TAG, "自定义下载目录创建失败: " + e.message)
+            }
+        }
         val d = File(context.getExternalFilesDir(null) ?: context.filesDir, "downloads")
         if (!d.exists()) d.mkdirs()
         return d
+    }
+
+    /** 当前实际生效的下载目录说明（给设置页显示用） */
+    fun downloadDirLabel(context: Context): String {
+        val d = downloadDir(context)
+        val p = try {
+            Settings.load(context)
+        } catch (_: Exception) {
+            null
+        }
+        val mode = p?.downloadMode ?: 0
+        val name = when (mode) {
+            1 -> "公共 Download/StrongholdPacks"
+            2 -> "自定义路径"
+            else -> "应用私有目录"
+        }
+        return name + "\n" + d.absolutePath
     }
 
     /** 解压临时目录（解压完成后会删掉） */
