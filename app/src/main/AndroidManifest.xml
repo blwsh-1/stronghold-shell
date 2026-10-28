@@ -15,7 +15,7 @@
     <!-- 把游戏包下载到公共 Download 目录需要写权限（Android 9 及以下） -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
-        android:maxSdkVersion="28" />
+        android:maxSdkVersion="29" />
     <!-- Android 10 起用分区存储：向公共目录写文件靠 requestLegacyExternalStorage
          在 10 上生效，11+ 则由系统按 MediaStore/Documents 授权 -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
