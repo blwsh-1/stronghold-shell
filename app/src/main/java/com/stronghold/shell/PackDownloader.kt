@@ -461,7 +461,7 @@ object PackDownloader {
         val custom = p?.downloadPath ?: ""
         val candidate: File? = when (mode) {
             1 -> File(android.os.Environment.getExternalStoragePublicDirectory(
-                android.os.Environment.DIRECTORY_DOWNLOAD), "StrongholdPacks")
+                android.os.Environment.DIRECTORY_DOWNLOADS), "StrongholdPacks")
             2 -> if (custom.isNotBlank()) File(custom) else null
             else -> null
         }
@@ -488,16 +488,31 @@ object PackDownloader {
             null
         }
         val mode = p?.downloadMode ?: 0
-        val name = when (mode) {
-            1 -> "公共 Download/StrongholdPacks"
-            2 -> "自定义路径"
+        // 用实际生效的目录反推名字：模式选了公共/自定义但权限不足时会回落，
+        // 这时要如实显示回落后的位置，不能只看设置值
+        val actual = when {
+            d.absolutePath.contains("/Download/StrongholdPacks") -> "公共 Download/StrongholdPacks"
+            mode == 2 && d.absolutePath == (p?.downloadPath ?: "") -> "自定义路径"
             else -> "应用私有目录"
         }
-        return name + "\n" + d.absolutePath
+        val fallback = if (mode == 1 && !actual.startsWith("公共")) "（权限不足，已回落）"
+        else if (mode == 2 && actual != "自定义路径") "（路径不可用，已回落）"
+        else ""
+        return actual + fallback + "\n" + d.absolutePath
     }
 
-    /** 解压临时目录（解压完成后会删掉） */
-    fun stagingDir(context: Context): File = File(downloadDir(context), ".staging")
+    /**
+     * 解压临时目录。
+     *
+     * 注意：不要放在下载目录里！下载目录可能被用户改成公共 /sdcard/Download，
+     * 在 FUSE 挂载点上解压上万个小文件会慢 10 倍以上，而且跨挂载点 renameTo 会失败。
+     * 所以这里固定用应用内部私有目录。
+     */
+    fun stagingDir(context: Context): File {
+        val d = File(context.filesDir, "staging")
+        if (!d.exists()) d.mkdirs()
+        return d
+    }
 
     /** 本地已有包的检查结果 */
     data class LocalCheck(
