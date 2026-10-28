@@ -98,6 +98,62 @@ object PackDownloader {
     )
 
     /**
+     * 抢跑式探测：所有通道同时开始，**第一个成功的立刻返回**，
+     * 不再等最慢的那个。
+     *
+     * 原来的写法是等全部通道跑完再排序，3 个死链各拖 8 秒，用户要等 8 秒以上。
+     * 现在只要有一个通道成功（实测最快 1.2 秒），马上就能开始下载，
+     * 剩下的通道继续在后台跑，结果缓存起来给后续换源用。
+     *
+     * @param onWinner 第一个成功的通道，在探测线程里回调
+     * @param totalTimeoutMs 总超时，到点还没成功的强制放弃
+     * @return 所有探测结果（含后台补完的），供界面显示
+     */
+    fun probeRacing(
+        url: String,
+        totalTimeoutMs: Int = 6000,
+        onWinner: (Pair<String, String>) -> Unit
+    ): List<Probe> {
+        val results = Collections.synchronizedList(ArrayList<Probe>())
+        val pool = Executors.newFixedThreadPool(MIRRORS.size)
+        val winnerFlag = java.util.concurrent.atomic.AtomicBoolean(false)
+        val latch = java.util.concurrent.CountDownLatch(1)
+
+        for ((prefix, name) in MIRRORS) {
+            pool.execute {
+                val p = probeOne(url, prefix, name, 3000)
+                results.add(p)
+                if (p.ok && winnerFlag.compareAndSet(false, true)) {
+                    // 抢到了：立刻通知调用方开始下载，不等别人
+                    try {
+                        onWinner(prefix to name)
+                    } catch (_: Exception) {
+                    }
+                    latch.countDown()
+                }
+            }
+        }
+        // 等第一个成功者，或者等到总超时
+        try {
+            latch.await(totalTimeoutMs.toLong(), TimeUnit.MILLISECONDS)
+        } catch (_: Exception) {
+        }
+        pool.shutdown()
+        // 给后台线程一点时间补完结果（用于界面显示），但不阻塞太久
+        try {
+            pool.awaitTermination(1500, TimeUnit.MILLISECONDS)
+        } catch (_: Exception) {
+        }
+        val snapshot = ArrayList(results)
+        for ((prefix, name) in MIRRORS) {
+            if (snapshot.none { it.prefix == prefix }) {
+                snapshot.add(Probe(prefix, name, false, reason = "探测中"))
+            }
+        }
+        return snapshot.filter { it.ok }.sortedBy { it.costMs } + snapshot.filter { !it.ok }
+    }
+
+    /**
      * 逐个体检所有通道，返回全部结果（失败的也在内），供界面展示。
      * 成功项按耗时升序排在前面，失败项排在后面。
      */
@@ -139,6 +195,8 @@ object PackDownloader {
             conn.readTimeout = timeoutMs
             conn.requestMethod = "GET"
             conn.setRequestProperty("User-Agent", "StrongholdShell-Launcher")
+            // 禁止代理做透明压缩：否则拿不到真实 Content-Length，二进制流也可能被改坏
+            conn.setRequestProperty("Accept-Encoding", "identity")
             conn.setRequestProperty("Range", "bytes=0-65535")
             val code = conn.responseCode
             if (code != 200 && code != 206) {
@@ -365,6 +423,7 @@ object PackDownloader {
             conn.connectTimeout = 20000
             conn.readTimeout = 30000
             conn.setRequestProperty("User-Agent", "StrongholdShell-Launcher")
+            conn.setRequestProperty("Accept-Encoding", "identity")
             if (startPos > 0) {
                 conn.setRequestProperty("Range", "bytes=$startPos-")
             }
