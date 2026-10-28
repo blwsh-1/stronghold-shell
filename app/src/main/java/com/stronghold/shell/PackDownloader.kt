@@ -84,11 +84,19 @@ object PackDownloader {
         }
         pool.shutdown()
         try {
-            pool.awaitTermination(timeoutMs.toLong() * 3, TimeUnit.MILLISECONDS)
+            // 每个通道最多等 timeoutMs，留足余量，避免结果缺项
+            pool.awaitTermination(timeoutMs.toLong() * 4 + 4000, TimeUnit.MILLISECONDS)
         } catch (_: Exception) {
         }
-        val okList = results.filter { it.ok }.sortedBy { it.costMs }
-        val badList = results.filter { !it.ok }
+        val resultsFinal = ArrayList(results)
+        // 没回来的通道也要列出，否则用户看不到它们为什么"消失"
+        for ((prefix, name) in MIRRORS) {
+            if (resultsFinal.none { it.prefix == prefix }) {
+                resultsFinal.add(Probe(prefix, name, false, reason = "无响应/超时"))
+            }
+        }
+        val okList = resultsFinal.filter { it.ok }.sortedBy { it.costMs }
+        val badList = resultsFinal.filter { !it.ok }
         return okList + badList
     }
 
@@ -113,12 +121,21 @@ object PackDownloader {
             // 但 content-type 却被标成 text/html。唯一可信的判据是读真实字节看魔数。
             val buf = ByteArray(65536)
             var got = 0
-            conn.inputStream.use { ins ->
-                while (got < buf.size) {
-                    val n = ins.read(buf, got, buf.size - got)
-                    if (n <= 0) break
-                    got += n
+            try {
+                conn.inputStream.use { ins ->
+                    while (got < buf.size) {
+                        val n = ins.read(buf, got, buf.size - got)
+                        if (n <= 0) break
+                        got += n
+                    }
                 }
+            } catch (_: Exception) {
+            }
+            // 立刻断开：若服务器不支持 Range 会返回 200 并准备推送整个 800MB，
+            // 不主动断开的话 close() 会去 drain 剩余响应体，把测速线程拖死
+            try {
+                conn.disconnect()
+            } catch (_: Exception) {
             }
             if (got < 4) return Probe(prefix, name, false, reason = "只读到 $got 字节")
             val isZip = buf[0] == 0x50.toByte() && buf[1] == 0x4B.toByte() &&
