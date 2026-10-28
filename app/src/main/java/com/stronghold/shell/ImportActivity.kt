@@ -893,8 +893,11 @@ class ImportActivity : AppCompatActivity() {
      * 申请写入公共 Download 目录所需权限。
      * Android 11+ 需要「所有文件访问」权限，要去系统设置页手动开，
      * 所以这里引导用户跳转，而不是弹普通权限框。
+     *
+     * @param onOk 已有权限时直接执行
+     * @param onDenied 用户明确不授权时执行（一般用来回落到私有目录并继续）
      */
-    private fun ensureStoragePermission(onOk: () -> Unit) {
+    private fun ensureStoragePermission(onOk: () -> Unit, onDenied: (() -> Unit)? = null) {
         if (android.os.Build.VERSION.SDK_INT >= 30) {
             if (android.os.Environment.isExternalStorageManager()) {
                 onOk()
@@ -905,8 +908,7 @@ class ImportActivity : AppCompatActivity() {
                 .setMessage(
                     "要把游戏包保存到公共 Download 目录（这样你能在文件管理器里找到、也能直接分享），" +
                         "需要授予「所有文件访问权限」。\n\n" +
-                        "点「去授权」后在系统页面找到本应用，打开开关，然后回来重新点下载即可。\n\n" +
-                        "如果不想授权，也可以选「应用私有目录」，功能不受影响，只是文件管理器看不到。"
+                        "点「去授权」后在系统页面找到本应用，打开开关，然后回来重新点下载即可。"
                 )
                 .setPositiveButton("去授权") { _, _ ->
                     try {
@@ -924,7 +926,13 @@ class ImportActivity : AppCompatActivity() {
                         }
                     }
                 }
-                .setNegativeButton("取消", null)
+                .setNegativeButton("改用私有目录") { _, _ ->
+                    val p = Settings.load(this)
+                    p.downloadMode = 0
+                    Settings.save(this, p)
+                    toast("已改用应用私有目录")
+                    if (onDenied != null) onDenied() else onOk()
+                }
                 .show()
             return
         }
@@ -933,12 +941,16 @@ class ImportActivity : AppCompatActivity() {
             if (checkSelfPermission(need) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 onOk()
             } else {
+                pendingPermissionNext = onDenied
                 requestPermissions(arrayOf(need), 9101)
             }
         } else {
             onOk()
         }
     }
+
+    /** 权限回调返回后的动作（null 表示无法继续） */
+    private var pendingPermissionNext: (() -> Unit)? = null
 
     /** 下载位置的中文短名 */
     private fun shortDirName(mode: Int): String = when (mode) {
@@ -959,14 +971,16 @@ class ImportActivity : AppCompatActivity() {
             "公共 Download/StrongholdPacks（文件管理器可见，推荐）",
             "自定义路径…"
         )
+        // 标题里带上当前路径：AlertDialog 不能同时 setMessage + setSingleChoiceItems，
+        // 否则单选列表会被吞掉，用户点不到任何东西
+        val titleText = "选择下载位置\n（当前：" + shortDirName(cur.downloadMode) + "）"
         val checked = when (cur.downloadMode) {
             0 -> 0
             2 -> 2
             else -> 1
         }
         AlertDialog.Builder(this)
-            .setTitle("选择下载位置")
-            .setMessage("当前：\n    $curLabel\n\n本次下载会保存到所选的目录。")
+            .setTitle(titleText)
             .setSingleChoiceItems(items, checked) { d, which ->
                 when (which) {
                     0 -> {
@@ -989,11 +1003,11 @@ class ImportActivity : AppCompatActivity() {
                     }
                     2 -> {
                         d.dismiss()
-                        askCustomPathForDownload(cur.downloadPath) { ok ->
-                            if (ok) {
-                                ensureStoragePermission {
-                                    doDownload(info, asset)
-                                }
+                        // 先确保有文件访问权限，再让用户填路径：
+                        // 没权限时 canWrite() 必然 false，会导致自定义路径永远设不成
+                        ensureStoragePermission {
+                            askCustomPathForDownload(cur.downloadPath) { ok ->
+                                if (ok) doDownload(info, asset)
                             }
                         }
                     }
@@ -1897,7 +1911,7 @@ class ImportActivity : AppCompatActivity() {
             .show()
     }
 
-    // 权限结果回来：授予了就继续下载，没给就切回应用私有目录
+    // 权限结果回来：授予了就继续下载，没给就切回应用私有目录并继续
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -1905,16 +1919,19 @@ class ImportActivity : AppCompatActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 9101) {
+            if (isFinishing || isDestroyed) return
             val granted = grantResults.isNotEmpty() &&
                 grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED
+            val next = pendingPermissionNext
+            pendingPermissionNext = null
             if (granted) {
-                toast("已授权，可以重新点下载了")
+                toast("已授权，请重新点下载")
             } else {
                 val p = Settings.load(this)
                 p.downloadMode = 0
                 Settings.save(this, p)
                 toast("未授权，已改用应用私有目录")
-                switchNav(NAV_SETTINGS)
+                if (next != null) next()
             }
         }
     }
