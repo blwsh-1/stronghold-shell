@@ -124,6 +124,12 @@ object ZipInstaller {
 
         onProgress?.invoke(count, bytes)
         Log.i(TAG, "解压完成：$count 个文件，${bytes / 1048576}MB")
+        // 一个有效的游戏包不可能 0 文件。解出 0 个说明 zip 是坏的
+        // （常见于下载到的是 HTML 错误页：ZipInputStream 遇到非 zip 直接返回 null，
+        //  不抛异常，于是"成功解压了 0 个文件"，上层误判为安装成功）
+        if (count == 0) {
+            throw IllegalStateException("压缩包无效：解出 0 个文件（可能下载到的是错误页）")
+        }
         return count
     }
 
