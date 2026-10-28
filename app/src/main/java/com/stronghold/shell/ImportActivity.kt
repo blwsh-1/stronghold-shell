@@ -49,6 +49,10 @@ class ImportActivity : AppCompatActivity() {
     private var downloading = false
     private var downloadLabel: TextView? = null
     private var downloadBar: View? = null
+    /** 下载卡片里的「换个源」按钮 */
+    private var downloadSwitchBtn: View? = null
+    /** 当前已下载字节数（换源时写进日志，也用于估算剩余时间） */
+    private var curDownloadedBytes: Long = 0L
     /** 本地游戏包列表弹框（点选某一行后需要关掉它） */
     private var currentLocalDialog: AlertDialog? = null
     /** 下载通道选择弹框（点选后需要关掉它） */
@@ -241,10 +245,19 @@ class ImportActivity : AppCompatActivity() {
         dlCard.addView(lbl)
         dlCard.addView(UiKit.spacer(this, 8f))
         dlCard.addView(bar)
+        // 下载中随时可手动换源：卡住或太慢时不用等，也不用取消重来
+        val swBtn = UiKit.button(this, "🔄  太慢了？换个源", false) {
+            PackDownloader.requestSwitchMirror()
+            toast("正在切换下载源…（已下载的部分会保留）")
+            FileLogger.log("用户手动请求换源（已下 " + PackDownloader.fmtMb(curDownloadedBytes) + " MB）")
+        }
+        dlCard.addView(UiKit.spacer(this, 8f))
+        dlCard.addView(swBtn)
         c.addView(dlCard, cardLp())
         downloadLabel = lbl
         downloadCard = dlCard
         downloadBar = bar
+        downloadSwitchBtn = swBtn
 
         val info = updateInfo
         val current = packs.firstOrNull { it.id == activeId }
@@ -1731,7 +1744,12 @@ class ImportActivity : AppCompatActivity() {
                 dest = dest,
                 expectedSize = asset.sizeBytes,
                 listener = object : PackDownloader.Listener {
+                    // 当前速度与当前通道，供 onProgress 拼进文案
+                    @Volatile
+                    var speedBps: Long = 0L
+
                     override fun onProgress(downloaded: Long, total: Long) {
+                        curDownloadedBytes = downloaded
                         val now = System.currentTimeMillis()
                         if (now - lastUi < 300) return
                         lastUi = now
@@ -1740,8 +1758,20 @@ class ImportActivity : AppCompatActivity() {
                         val dlMb = "%.1f".format(downloaded / 1048576.0)
                         val totMb = "%.1f".format(tot / 1048576.0)
                         val pctInt = pct.toInt()
+                        // 速度和剩余时间：让用户直接看出是不是卡住了
+                        val sp = speedBps
+                        val speedText = if (sp > 0) {
+                            "  " + "%.1f".format(sp / 1048576.0) + " MB/s"
+                        } else ""
+                        val etaText = if (sp > 65536 && tot > downloaded) {
+                            val sec = (tot - downloaded) / sp
+                            val mm = sec / 60
+                            val ss = sec % 60
+                            "  剩余约 " + mm + "分" + ss + "秒"
+                        } else ""
                         ui.post {
-                            downloadLabel?.text = "下载中 $dlMb / $totMb MB  ($pctInt%)"
+                            downloadLabel?.text =
+                                "下载中 $dlMb / $totMb MB  ($pctInt%)" + speedText + etaText
                             (downloadBar as? View)?.let { v ->
                                 try {
                                     val m = v.javaClass.getMethod("setProgress", Float::class.java)
@@ -1752,8 +1782,16 @@ class ImportActivity : AppCompatActivity() {
                         }
                     }
 
+                    override fun onSpeed(bytesPerSec: Long) {
+                        speedBps = bytesPerSec
+                    }
+
                     override fun onMirror(idx: Int, count: Int, name: String) {
-                        ui.post { downloadLabel?.text = "镜像 $name（$idx/$count）下载中…" }
+                        ui.post {
+                            downloadLabel?.text = "切换到 $name（$idx/$count）…"
+                            toast("已切换到：" + name)
+                        }
+                        FileLogger.log("下载通道切换：$name（$idx/$count）")
                     }
                 },
                 preferredMirrors = preferredMirrors
