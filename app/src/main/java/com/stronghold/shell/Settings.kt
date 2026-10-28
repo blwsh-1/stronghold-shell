@@ -31,7 +31,11 @@ object Settings {
         var autoCheckPack: Boolean = true,     // 启动时自动查「游戏包」更新（上游 GitHub Release）
         var autoCheckApp: Boolean = true,      // 启动时自动查「启动器自身」更新（本项目 Release）
         var lastKnownLatest: String = "",      // 上次查到的游戏包最新版本
-        var lastKnownAppVersion: String = ""   // 上次查到的启动器最新版本
+        var lastKnownAppVersion: String = "",  // 上次查到的启动器最新版本
+        // --- 下载相关 ---
+        var downloadMode: Int = 1,             // 0=应用私有 1=公共Download 2=自定义
+        var downloadPath: String = "",         // mode=2 时用的绝对路径
+        var keepZipAfterInstall: Boolean = true // 安装完成后是否保留 zip（方便分享/重装）
     )
 
     private fun file(context: Context): File {
@@ -55,9 +59,12 @@ object Settings {
                 // 老配置里可能只有 autoCheckUpdate，兼容迁移：两边都继承旧值
                 autoCheckPack = j.optBoolean("autoCheckPack", j.optBoolean("autoCheckUpdate", true)),
                 autoCheckApp = j.optBoolean("autoCheckApp", j.optBoolean("autoCheckUpdate", true)),
-                lastKnownLatest = j.optString("lastKnownLatest", ""),
-                lastKnownAppVersion = j.optString("lastKnownAppVersion", "")
-            )
+lastKnownLatest = j.optString("lastKnownLatest", ""),
+                 lastKnownAppVersion = j.optString("lastKnownAppVersion", ""),
+                 downloadMode = j.optInt("downloadMode", 1),
+                 downloadPath = j.optString("downloadPath", ""),
+                 keepZipAfterInstall = j.optBoolean("keepZipAfterInstall", true)
+             )
         } catch (e: Exception) {
             Log.w(TAG, "读设置失败: ${e.message}")
             Prefs()
@@ -77,6 +84,9 @@ object Settings {
                 put("autoCheckApp", p.autoCheckApp)
                 put("lastKnownLatest", p.lastKnownLatest)
                 put("lastKnownAppVersion", p.lastKnownAppVersion)
+                put("downloadMode", p.downloadMode)
+                put("downloadPath", p.downloadPath)
+                put("keepZipAfterInstall", p.keepZipAfterInstall)
             }
             file(context).writeText(j.toString(2))
             true
