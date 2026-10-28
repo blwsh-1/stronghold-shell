@@ -44,23 +44,120 @@ object PackDownloader {
     /** 完整下载最多重试轮数（每轮都会续传，不会从头重下） */
     private const val MAX_ROUNDS = 4
 
-    /** 代理前缀列表（按国内可用性排序，第一个是直连） */
+    /**
+     * 下载通道列表。空前缀 = 直接用官方 URL。
+     *
+     * 说明：release 的官方 URL 会 302 跳到 objects.githubusercontent.com，
+     * 这个直链是最原始、最不依赖第三方的路径，必须保留。
+     */
     val MIRRORS = listOf(
-        "" to "GitHub 直连",
-        "https://gh-proxy.com/" to "gh-proxy.com",
-        "https://ghfast.top/" to "ghfast.top",
-        "https://ghproxy.net/" to "ghproxy.net",
+        "" to "GitHub 原版直连",
         "https://gh.monlor.com/" to "gh.monlor.com",
-        "https://slink.ltd/" to "slink.ltd",
-        "https://gh.llkk.cc/" to "gh.llkk.cc"
+        "https://gh-proxy.com/" to "gh-proxy.com",
+        "https://ghproxy.net/" to "ghproxy.net",
+        "https://ghfast.top/" to "ghfast.top"
     )
+
+    /** 单个通道的探测结果 */
+    data class Probe(
+        val prefix: String,
+        val name: String,
+        /** 是否可用（拿到了真 ZIP 数据） */
+        val ok: Boolean,
+        /** 测速耗时（毫秒），失败时为 -1 */
+        val costMs: Long = -1,
+        /** 失败原因，成功时为空 */
+        val reason: String = ""
+    )
+
+    /**
+     * 逐个体检所有通道，返回全部结果（失败的也在内），供界面展示。
+     * 成功项按耗时升序排在前面，失败项排在后面。
+     */
+    fun probeAll(url: String, threads: Int = 5, timeoutMs: Int = 4000): List<Probe> {
+        val results = Collections.synchronizedList(ArrayList<Probe>())
+        val pool = Executors.newFixedThreadPool(threads)
+        for ((prefix, name) in MIRRORS) {
+            pool.execute {
+                results.add(probeOne(url, prefix, name, timeoutMs))
+            }
+        }
+        pool.shutdown()
+        try {
+            pool.awaitTermination(timeoutMs.toLong() * 3, TimeUnit.MILLISECONDS)
+        } catch (_: Exception) {
+        }
+        val okList = results.filter { it.ok }.sortedBy { it.costMs }
+        val badList = results.filter { !it.ok }
+        return okList + badList
+    }
+
+    /** 单个通道体检 */
+    private fun probeOne(url: String, prefix: String, name: String, timeoutMs: Int): Probe {
+        val full = if (prefix.isEmpty()) url else prefix + url
+        val t0 = System.currentTimeMillis()
+        var conn: HttpURLConnection? = null
+        try {
+            conn = URL(full).openConnection() as HttpURLConnection
+            conn.instanceFollowRedirects = true
+            conn.connectTimeout = timeoutMs
+            conn.readTimeout = timeoutMs
+            conn.requestMethod = "GET"
+            conn.setRequestProperty("User-Agent", "StrongholdShell-Launcher")
+            conn.setRequestProperty("Range", "bytes=0-65535")
+            val code = conn.responseCode
+            if (code != 200 && code != 206) {
+                return Probe(prefix, name, false, reason = "HTTP $code")
+            }
+            // 注意：不能靠 content-type 判断！实测 GitHub 原版直连返回真 ZIP，
+            // 但 content-type 却被标成 text/html。唯一可信的判据是读真实字节看魔数。
+            val buf = ByteArray(65536)
+            var got = 0
+            conn.inputStream.use { ins ->
+                while (got < buf.size) {
+                    val n = ins.read(buf, got, buf.size - got)
+                    if (n <= 0) break
+                    got += n
+                }
+            }
+            if (got < 4) return Probe(prefix, name, false, reason = "只读到 $got 字节")
+            val isZip = buf[0] == 0x50.toByte() && buf[1] == 0x4B.toByte() &&
+                buf[2] == 0x03.toByte() && buf[3] == 0x04.toByte()
+            if (!isZip) return Probe(prefix, name, false, reason = "不是压缩包")
+            return Probe(prefix, name, true, System.currentTimeMillis() - t0)
+        } catch (e: Exception) {
+            val r = when {
+                e is java.net.SocketTimeoutException -> "超时"
+                e is java.net.UnknownHostException -> "域名解析失败"
+                e is java.net.ConnectException -> "连接被拒"
+                else -> e.message?.take(30) ?: "异常"
+            }
+            return Probe(prefix, name, false, reason = r)
+        } finally {
+            try {
+                conn?.disconnect()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    /** 空通道（不测试、直接按顺序试）时用 */
+    fun allAsIs(): List<Pair<String, String>> = MIRRORS
 
     /**
      * 并发测速：对每个镜像做一次 Range 小请求，测出响应速度。
      *
      * @return 可用的镜像，按速度从快到慢排序
      */
-    fun probeMirrors(url: String, threads: Int = 7, timeoutMs: Int = 6000): List<Pair<String, String>> {
+    fun probeMirrors(url: String, threads: Int = 4, timeoutMs: Int = 3500): List<Pair<String, String>> {
+        // 统一走 probeAll，保证判据只有一套：读真实字节验 ZIP 魔数，
+        // 不看 content-type（GitHub 原版直连会把它错标成 text/html）
+        return probeAll(url, threads, timeoutMs).filter { it.ok }.map { it.prefix to it.name }
+    }
+
+    /** 保留旧实现，仅供参考，不再被调用 */
+    @Suppress("unused")
+    private fun probeMirrorsLegacy(url: String, threads: Int = 4, timeoutMs: Int = 3500): List<Pair<String, String>> {
         val results = Collections.synchronizedList(ArrayList<Triple<Long, String, String>>())
         val pool = Executors.newFixedThreadPool(threads)
         for ((prefix, name) in MIRRORS) {
@@ -77,14 +174,40 @@ object PackDownloader {
                     conn.setRequestProperty("User-Agent", "StrongholdShell-Launcher")
                     conn.setRequestProperty("Range", "bytes=0-65535")
                     val code = conn.responseCode
-                    if (code in 200..399) {
-                        // 读一点数据，确认真的能出流量
-                        val buf = ByteArray(16384)
-                        val n = conn.inputStream.use { it.read(buf) }
-                        if (n > 0) {
-                            val cost = System.currentTimeMillis() - t0
-                            results.add(Triple(cost, prefix, name))
+                    // 必须是 200/206：301/302 说明这个镜像只是把请求转出去，
+                    // 自己也拿不到文件；403/404 说明路径没转对
+                    if (code == 200 || code == 206) {
+                        // 排除 HTML 错误页：镜像失效时常常返回一个 200 的错误页，
+                        // 内容只有几百字节 HTML，读得到数据但根本不是压缩包
+                        val ct = conn.contentType ?: ""
+                        val isHtml = ct.contains("text/html", ignoreCase = true)
+                        if (isHtml) {
+                            Log.d(TAG, "测速排除 $name：返回 HTML 而非文件")
+                        } else {
+                            // 读满 64KB 再算速度：读太少测不出真实带宽，
+                            // 错误页恰恰因为小才快，会污染排序
+                            val buf = ByteArray(65536)
+                            var got = 0
+                            conn.inputStream.use { ins ->
+                                while (got < buf.size) {
+                                    val n = ins.read(buf, got, buf.size - got)
+                                    if (n <= 0) break
+                                    got += n
+                                }
+                            }
+                            // 必须确认是真 ZIP（PK\x03\x04）：这是最后一道关
+                            val isZip = got >= 4 && buf[0] == 0x50.toByte() &&
+                                buf[1] == 0x4B.toByte() &&
+                                buf[2] == 0x03.toByte() && buf[3] == 0x04.toByte()
+                            if (isZip) {
+                                val cost = System.currentTimeMillis() - t0
+                                results.add(Triple(cost, prefix, name))
+                            } else {
+                                Log.d(TAG, "测速排除 $name：不是 ZIP（前 4 字节不符）")
+                            }
                         }
+                    } else {
+                        Log.d(TAG, "测速排除 $name：HTTP $code")
                     }
                 } catch (e: Exception) {
                     Log.d(TAG, "测速失败 $name: ${e.message}")
@@ -180,6 +303,13 @@ object PackDownloader {
                 dest.delete()
                 startPos = 0
             }
+            // 已有的部分必须开头就是 ZIP：否则它是一段错误页 / 半截垃圾，
+            // 在上面续传只会把错误内容永久粘住，越下越错
+            if (startPos > 0 && !isZipFile(dest)) {
+                Log.w(TAG, "已有缓存不是 ZIP（${startPos} 字节），丢弃重下")
+                dest.delete()
+                startPos = 0
+            }
 
             val u = URL(url)
             conn = u.openConnection() as HttpURLConnection
@@ -249,6 +379,13 @@ object PackDownloader {
                 Log.w(TAG, "文件大小不符：${dest.length()} / $expectedSize")
                 return false
             }
+            // 大小对上了也要确认是真 ZIP：镜像有时会返回「大小凑巧接近」的错误页，
+            // 只有魔数校验能挡住
+            if (!isZipFile(dest)) {
+                Log.w(TAG, "文件不是 ZIP：${maskUrl(url)}")
+                dest.delete()   // 坏文件删掉，避免续传时越传越错
+                return false
+            }
             return true
         } catch (e: Exception) {
             Log.w(TAG, "下载异常: ${e.message}")
@@ -265,6 +402,21 @@ object PackDownloader {
         }
     }
 
+    /** 检查文件头是不是 ZIP 魔数 PK\x03\x04 */
+    fun isZipFile(f: File): Boolean {
+        if (!f.isFile || f.length() < 4) return false
+        return try {
+            java.io.RandomAccessFile(f, "r").use { r ->
+                val b = ByteArray(4)
+                r.readFully(b)
+                b[0] == 0x50.toByte() && b[1] == 0x4B.toByte() &&
+                    b[2] == 0x03.toByte() && b[3] == 0x04.toByte()
+            }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     /** 日志里隐藏完整 URL，只留文件名 */
     private fun maskUrl(url: String): String {
         val name = url.substringAfterLast("/")
@@ -276,6 +428,102 @@ object PackDownloader {
         val d = File(context.getExternalFilesDir(null) ?: context.filesDir, "downloads")
         if (!d.exists()) d.mkdirs()
         return d
+    }
+
+    /** 解压临时目录（解压完成后会删掉） */
+    fun stagingDir(context: Context): File = File(downloadDir(context), ".staging")
+
+    /** 本地已有包的检查结果 */
+    data class LocalCheck(
+        /** 文件是否存在 */
+        val exists: Boolean,
+        /** 文件大小（字节） */
+        val size: Long,
+        /** 是不是合法 ZIP（开头 PK\x03\x04） */
+        val isZip: Boolean,
+        /** ZIP 结构是否完整（能读出目录表） */
+        val zipOk: Boolean,
+        /** ZIP 里的文件条目数 */
+        val entries: Int,
+        /** 发现的问题说明 */
+        val problem: String,
+        /** 文件绝对路径 */
+        val path: String
+    )
+
+    /**
+     * 检查已下载的包：文件在不在、大小对不对、是不是真 ZIP、结构有没有坏。
+     * 这是“下载下来了但装不上”这种情形最需要的一步。
+     */
+    fun checkLocal(file: File, expectedSize: Long = 0L): LocalCheck {
+        if (!file.exists()) {
+            return LocalCheck(false, 0, false, false, 0, "文件不存在", file.absolutePath)
+        }
+        val size = file.length()
+        if (size == 0L) {
+            return LocalCheck(true, 0, false, false, 0, "文件是 0 字节（只创建了空文件）", file.absolutePath)
+        }
+        if (!isZipFile(file)) {
+            val head = readHeadText(file)
+            val hint = if (head.contains("<html", true) || head.contains("<!DOCTYPE", true))
+                "下载到的是网页（镜像返回的错误页）"
+            else "开头不是 ZIP 标志（PK）"
+            return LocalCheck(true, size, false, false, 0, hint, file.absolutePath)
+        }
+        // 大小对不上
+        var sizeProblem = ""
+        if (expectedSize > 0 && size != expectedSize) {
+            val diff = expectedSize - size
+            sizeProblem = if (diff > 0)
+                "文件不完整，还差 " + fmtMb(diff) + " MB"
+            else
+                "文件比官方大 " + fmtMb(-diff) + " MB"
+        }
+        // 读中央目录，验证压缩包结构
+        var entries = 0
+        var zipOk = true
+        var zipProblem = ""
+        try {
+            java.util.zip.ZipFile(file).use { zf ->
+                entries = zf.size()
+                if (entries == 0) {
+                    zipOk = false
+                    zipProblem = "压缩包内没有任何文件"
+                }
+            }
+        } catch (e: Exception) {
+            zipOk = false
+            zipProblem = "压缩包结构损坏（" + (e.message?.take(40) ?: "无法读取") + "）"
+        }
+        val problem = when {
+            zipProblem.isNotEmpty() -> zipProblem
+            sizeProblem.isNotEmpty() -> sizeProblem
+            else -> ""
+        }
+        return LocalCheck(true, size, true, zipOk, entries, problem, file.absolutePath)
+    }
+
+    /** 读文件开头一小段当文本，用来判断是不是网页 */
+    private fun readHeadText(f: File): String {
+        return try {
+            val n = minOf(f.length(), 512L).toInt()
+            val b = ByteArray(n)
+            java.io.RandomAccessFile(f, "r").use { r ->
+                r.readFully(b)
+            }
+            String(b, Charsets.UTF_8)
+        } catch (e: Exception) {
+            ""
+        }
+    }
+
+    fun fmtMb(bytes: Long): String = "%.1f".format(bytes / 1048576.0)
+
+    /** 下载目录里所有 zip，按修改时间倒序 */
+    fun listLocalZips(context: Context): List<File> {
+        val dir = downloadDir(context)
+        val arr = dir.listFiles { f -> f.isFile && f.name.endsWith(".zip", true) }
+        return (arr ?: emptyArray()).sortedByDescending { it.lastModified() }
     }
 
     /** 磁盘剩余空间（字节） */
