@@ -578,6 +578,10 @@ class ImportActivity : AppCompatActivity() {
         val mc = UiKit.button(this, "🌐  下载通道体检", false) { checkMirrorsNow() }
         tools.addView(mc)
         tools.addView(UiKit.spacer(this, 8f))
+        // 查看/处理已经下载好的包（下好了但装不上时用这个）
+        val lp = UiKit.button(this, "📦  本地游戏包（检测 / 安装 / 删除）", false) { showLocalPacks() }
+        tools.addView(lp)
+        tools.addView(UiKit.spacer(this, 8f))
         val lg = UiKit.button(this, "📄  查看运行日志", false) { showLog() }
         tools.addView(lg)
         c.addView(tools, cardLp())
@@ -1039,6 +1043,208 @@ class ImportActivity : AppCompatActivity() {
                         .show()
                 }
             }
+        }
+    }
+
+    /**
+     * 设置页里的“本地游戏包”：列出下载目录里已有的包，逐个体检，
+     * 并给出处理选项（直接安装 / 重新下载 / 删除 / 打开目录）。
+     * 专门解决“包其实下好了、但装不上又找不到在哪”这种情况。
+     */
+    private fun showLocalPacks() {
+        io.execute {
+            val zips = PackDownloader.listLocalZips(this@ImportActivity)
+            // 已知官方大小，用来判断完整性
+            var expected = 0L
+            try {
+                val info = UpdateChecker.fetchLatest()
+                val a = info?.let { UpdateChecker.pickAsset(it, UpdateChecker.PackKind.FULL) }
+                expected = a?.sizeBytes ?: 0L
+            } catch (_: Exception) {
+            }
+            val checks = zips.map { it to PackDownloader.checkLocal(it, expected) }
+            val dir = PackDownloader.downloadDir(this@ImportActivity)
+            ui.post {
+                if (checks.isEmpty()) {
+                    AlertDialog.Builder(this@ImportActivity)
+                        .setTitle("本地游戏包")
+                        .setMessage(
+                            "下载目录里没有任何压缩包。\n\n" +
+                                "目录位置：\n" + dir.absolutePath + "\n\n" +
+                                "说明：Android 11 以后系统限制，文件管理器一般进不去这个目录，\n" +
+                                "可以用下面的「打开下载目录」按钮，或把手机连电脑查看。"
+                        )
+                        .setPositiveButton("打开下载目录") { _, _ -> openDownloadDir() }
+                        .setNegativeButton("关闭", null)
+                        .show()
+                    return@post
+                }
+                val sb = StringBuilder()
+                for ((f, c) in checks) {
+                    sb.append(if (c.problem.isEmpty()) "✅ " else "❌ ").append(f.name).append("\n")
+                    sb.append("   大小 ").append(PackDownloader.fmtMb(c.size)).append(" MB")
+                    if (c.isZip) sb.append("，压缩包内 ").append(c.entries).append(" 个文件")
+                    sb.append("\n")
+                    if (c.problem.isNotEmpty()) sb.append("   问题：").append(c.problem).append("\n")
+                    sb.append("   ").append(f.absolutePath).append("\n\n")
+                }
+                val names = checks.map { (f, c) ->
+                    (if (c.problem.isEmpty()) "✅ " else "❌ ") + f.name + "（" +
+                        PackDownloader.fmtMB(c.size) + " MB）"
+                }.toTypedArray()
+                AlertDialog.Builder(this@ImportActivity)
+                    .setTitle("本地游戏包（点选处理）")
+                    .setMessage(sb.toString())
+                    .setItems(names) { _, which ->
+                        val (f, c) = checks[which]
+                        handleLocalPack(f, c)
+                    }
+                    .setPositiveButton("打开下载目录") { _, _ -> openDownloadDir() }
+                    .setNegativeButton("关闭", null)
+                    .show()
+            }
+        }
+    }
+
+    /** 针对某个本地包给出处理选项 */
+    private fun handleLocalPack(f: File, c: PackDownloader.LocalCheck) {
+        val canInstall = c.isZip && c.zipOk && c.problem.isEmpty()
+        val title = if (canInstall) "这个包是好的" else "这个包有问题"
+        val info = StringBuilder()
+        info.append("文件：").append(f.name).append("\n")
+        info.append("大小：").append(PackDownloader.fmtMb(c.size)).append(" MB\n")
+        info.append("路径：").append(f.absolutePath).append("\n\n")
+        if (canInstall) {
+            info.append("检测通过：ZIP 结构完整，共 ").append(c.entries).append(" 个文件。\n")
+            info.append("可以直接安装。")
+        } else {
+            info.append("问题：").append(c.problem).append("\n\n")
+            if (!c.isZip) {
+                info.append("说明：这不是一个真正的游戏压缩包，多半是下载时拿到了镜像的网页错误页。")
+            } else {
+                info.append("说明：压缩包结构不完整，通常是下载中断导致的，需要重新下载。")
+            }
+        }
+        val b = AlertDialog.Builder(this@ImportActivity)
+        b.setTitle(title)
+        b.setMessage(info.toString())
+        if (canInstall) {
+            b.setPositiveButton("直接安装") { _, _ -> installLocalPack(f) }
+            b.setNeutralButton("删除") { _, _ -> deleteLocalPack(f) }
+        } else {
+            b.setPositiveButton("删除并重新下载") { _, _ ->
+                f.delete()
+                toast("已删除，请重新下载")
+                checkUpdate(silent = false)
+            }
+            b.setNeutralButton("只删除") { _, _ -> deleteLocalPack(f) }
+        }
+        b.setNegativeButton("关闭", null)
+        b.show()
+    }
+
+    private fun deleteLocalPack(f: File) {
+        val ok = try {
+            f.delete()
+        } catch (e: Exception) {
+            false
+        }
+        toast(if (ok) "已删除" else "删除失败")
+        FileLogger.log("删除本地包：" + f.name + (if (ok) " 成功" else " 失败"))
+    }
+
+    /** 用本地已有的包直接解压安装 */
+    private fun installLocalPack(f: File) {
+        if (downloading) {
+            toast("正在下载中，请稍候")
+            return
+        }
+        downloading = true
+        downloadCard?.visibility = View.VISIBLE
+        downloadLabel?.text = "正在安装本地包…"
+        FileLogger.log("从本地包安装：" + f.absolutePath)
+        io.execute {
+            try {
+                val root = PackManager.packsRoot(this@ImportActivity)
+                val stage = File(root, ".incoming")
+                stage.deleteRecursively()
+                stage.mkdirs()
+                var last = 0L
+                val n = ZipInstaller.extractFile(f, stage) { done, _ ->
+                    val now = System.currentTimeMillis()
+                    if (now - last > 400) {
+                        last = now
+                        ui.post { downloadLabel?.text = "解压中… 已处理 $done 个文件" }
+                    }
+                }
+                if (n <= 0) throw IllegalStateException("解压出 0 个文件")
+                val entries = stage.listFiles()
+                val base = if (entries != null && entries.size == 1 && entries[0].isDirectory)
+                    entries[0] else stage
+                val ver = guessVersion(f.name)
+                val dest = File(root, ver)
+                dest.deleteRecursively()
+                if (!base.renameTo(dest)) {
+                    base.copyRecursively(dest, overwrite = true)
+                    stage.deleteRecursively()
+                }
+                PackManager.setActive(this@ImportActivity, ver)
+                FileLogger.log("本地包安装完成：v$ver（$n 个文件）")
+                ui.post {
+                    downloadCard?.visibility = View.GONE
+                    downloading = false
+                    toast("安装完成：v$ver")
+                    AlertDialog.Builder(this@ImportActivity)
+                        .setTitle("安装完成")
+                        .setMessage("版本 v$ver 已安装并设为当前版本。")
+                        .setPositiveButton("开始游戏") { _, _ -> startGame() }
+                        .setNegativeButton("关闭", null)
+                        .show()
+                }
+            } catch (e: Exception) {
+                FileLogger.log("本地包安装失败：" + (e.message ?: "未知"))
+                ui.post {
+                    downloadCard?.visibility = View.GONE
+                    downloading = false
+                    AlertDialog.Builder(this@ImportActivity)
+                        .setTitle("安装失败")
+                        .setMessage((e.message ?: "未知错误") + "\n\n可以删除这个包后重新下载。")
+                        .setPositiveButton("删除这个包") { _, _ -> deleteLocalPack(f) }
+                        .setNegativeButton("关闭", null)
+                        .show()
+                }
+            }
+        }
+    }
+
+    /** 从文件名里猜版本号，猜不到就用时间戳 */
+    private fun guessVersion(name: String): String {
+        val m = Regex("""v?(\d+\.\d+\.\d+)""").find(name)
+        return m?.groupValues?.get(1) ?: ("local-" + System.currentTimeMillis())
+    }
+
+    /** 打开下载目录（调系统文件管理器） */
+    private fun openDownloadDir() {
+        val dir = PackDownloader.downloadDir(this@ImportActivity)
+        try {
+            val i = android.content.Intent(android.content.Intent.ACTION_VIEW)
+            i.setDataAndType(android.net.Uri.parse("content://com.android.externalstorage.documents/document/primary%3AAndroid%2Fdata%2Fcom.stronghold.shell.lab%2Ffiles%2Fdownloads"), "*/*")
+            i.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            startActivity(i)
+            toast("目录：" + dir.absolutePath)
+        } catch (e: Exception) {
+            AlertDialog.Builder(this@ImportActivity)
+                .setTitle("下载目录")
+                .setMessage(
+                    "目录路径：\n" + dir.absolutePath + "\n\n" +
+                        "Android 11 以后，这个目录属于应用私有空间，普通文件管理器看不到。\n" +
+                        "查看方法：\n" +
+                        "① 手机连电脑，在电脑上打开该路径\n" +
+                        "② 或用支持 root / Shizuku 的文件管理器\n" +
+                        "③ 直接在本页点「直接安装」，不需要进目录"
+                )
+                .setPositiveButton("知道了", null)
+                .show()
         }
     }
 
