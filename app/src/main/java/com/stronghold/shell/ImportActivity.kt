@@ -573,6 +573,26 @@ class ImportActivity : AppCompatActivity() {
             switchNav(NAV_SETTINGS)
         } }, cardLp())
 
+        c.addView(UiKit.divider(this, "下载"))
+        c.addView(settingRow(
+            "下载位置",
+            when (cur.downloadMode) {
+                0 -> "应用私有"
+                2 -> "自定义"
+                else -> "公共 Download"
+            },
+            PackDownloader.downloadDirLabel(this)
+        ) { chooseDownloadPath() }, cardLp())
+
+        c.addView(settingRow(
+            "安装后保留压缩包", if (cur.keepZipAfterInstall) "开" else "关",
+            "保留后可分享给朋友、重装免重下；关掉可省 821MB"
+        ) { chooseString("保留压缩包", if (cur.keepZipAfterInstall) "on" else "off",
+            listOf("on", "off"), listOf("开", "关")) { v ->
+            val p = Settings.load(this); p.keepZipAfterInstall = (v == "on"); Settings.save(this, p)
+            switchNav(NAV_SETTINGS)
+        } }, cardLp())
+
         c.addView(UiKit.divider(this, "TOOLS"))
         val tools = UiKit.card(this)
         val dr = UiKit.button(this, "🔧  运行环境诊断", true) { runDoctor() }
@@ -1411,6 +1431,82 @@ class ImportActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 选择下载位置：三种预设 + 自定义路径
+     */
+    private fun chooseDownloadPath() {
+        val cur = Settings.load(this)
+        val opts = arrayOf(
+            "应用私有目录（最稳，但文件管理器看不见）",
+            "公共 Download/StrongholdPacks（文件管理器可见，方便分享）",
+            "自定义路径…"
+        )
+        AlertDialog.Builder(this)
+            .setTitle("下载位置")
+            .setItems(opts) { _, which ->
+                when (which) {
+                    0 -> {
+                        val p = Settings.load(this)
+                        p.downloadMode = 0
+                        Settings.save(this, p)
+                        toast("已改为应用私有目录")
+                        switchNav(NAV_SETTINGS)
+                    }
+                    1 -> {
+                        val p = Settings.load(this)
+                        p.downloadMode = 1
+                        Settings.save(this, p)
+                        toast("已改为公共 Download 目录")
+                        switchNav(NAV_SETTINGS)
+                    }
+                    2 -> askCustomPath(cur.downloadPath)
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 让用户手填一个绝对路径 */
+    private fun askCustomPath(current: String) {
+        val et = android.widget.EditText(this)
+        et.setText(current)
+        et.setHint("/sdcard/Download/StrongholdPacks")
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val wrap = android.widget.FrameLayout(this)
+        wrap.setPadding(pad, pad / 2, pad, 0)
+        wrap.addView(et)
+        AlertDialog.Builder(this)
+            .setTitle("自定义下载路径")
+            .setMessage("填一个手机上的绝对路径，例如：\n/sdcard/Download/StrongholdPacks")
+            .setView(wrap)
+            .setPositiveButton("确定") { _, _ ->
+                val path = et.text.toString().trim()
+                if (path.isEmpty() || !path.startsWith("/")) {
+                    toast("路径要写完整，必须以 / 开头")
+                    return@setPositiveButton
+                }
+                val f = File(path)
+                val ok = try {
+                    if (!f.exists()) f.mkdirs()
+                    f.isDirectory && f.canWrite()
+                } catch (e: Exception) {
+                    false
+                }
+                if (!ok) {
+                    toast("这个路径建不出来或不可写，请换一个")
+                    return@setPositiveButton
+                }
+                val p = Settings.load(this)
+                p.downloadMode = 2
+                p.downloadPath = path
+                Settings.save(this, p)
+                toast("已设为：" + path)
+                switchNav(NAV_SETTINGS)
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
     private fun doDownload(info: UpdateChecker.ReleaseInfo, asset: UpdateChecker.Asset) {
         downloading = true
         downloadCard?.visibility = View.VISIBLE
@@ -1512,7 +1608,17 @@ class ImportActivity : AppCompatActivity() {
                 val version = PackManager.readVersionFrom(gameDir) ?: info.version
                 PackManager.register(this@ImportActivity, gameDir, version, source = "github", setActive = true)
                 stage.deleteRecursively()
-                dest.delete()
+                // 按设置决定是否保留压缩包：保留方便分享给朋友、重装免重下
+                val keep = try {
+                    Settings.load(this@ImportActivity).keepZipAfterInstall
+                } catch (_: Exception) {
+                    true
+                }
+                if (keep) {
+                    FileLogger.log("压缩包已保留：" + dest.absolutePath)
+                } else {
+                    dest.delete()
+                }
                 FileLogger.log("在线下载并安装完成：v$version")
                 downloading = false
                 ui.post {
