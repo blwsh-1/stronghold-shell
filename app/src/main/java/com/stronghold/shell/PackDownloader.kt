@@ -36,7 +36,34 @@ object PackDownloader {
         fun onProgress(downloaded: Long, total: Long)
         /** 切换镜像时通知（第 idx 个，共 count 个） */
         fun onMirror(idx: Int, count: Int, name: String) {}
+        /** 实时速度（字节/秒），用于界面显示和用户判断是否手动换源 */
+        fun onSpeed(bytesPerSec: Long) {}
     }
+
+    /**
+     * 手动换源请求：外部（界面上的「换个源」按钮）调 [requestSwitchMirror]，
+     * 下载线程在下一轮循环读到标记后立刻放弃当前通道，换下一个。
+     *
+     * 用 AtomicBoolean 而不是 @Volatile 布尔：getAndSet 是原子操作，
+     * 避免「读了 true、还没置 false 时又被点一次」丢请求。
+     */
+    private val switchRequested = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** 当前正在用的连接，换源时直接断开它，避免卡在建连/读响应头阶段换不走 */
+    @Volatile
+    private var activeConn: java.net.HttpURLConnection? = null
+
+    fun requestSwitchMirror() {
+        switchRequested.set(true)
+        // 主动断开当前连接：如果正卡在 connect() 或读响应头，光靠标记是换不动的
+        try {
+            activeConn?.disconnect()
+        } catch (_: Exception) {
+        }
+    }
+
+    /** 供 tryDownloadOnce 检查：返回 true 表示外部要求换源 */
+    private fun consumeSwitchRequest(): Boolean = switchRequested.getAndSet(false)
 
     /** 一轮下载内最多尝试的镜像数 */
     private const val MIRRORS_PER_ROUND = 4
@@ -312,6 +339,8 @@ object PackDownloader {
         var raf: RandomAccessFile? = null
         var conn: HttpURLConnection? = null
         try {
+            // 新通道开始前，丢弃上一个通道遗留的换源标记，避免刚连上就被误杀
+            consumeSwitchRequest()
             var startPos = if (dest.exists()) dest.length() else 0L
             // 已经下完了（大小对得上）直接成功
             if (expectedSize > 0 && startPos == expectedSize) return true
@@ -330,6 +359,8 @@ object PackDownloader {
 
             val u = URL(url)
             conn = u.openConnection() as HttpURLConnection
+            // 登记当前连接：手动换源时可以直接断开它
+            activeConn = conn
             conn.instanceFollowRedirects = true
             conn.connectTimeout = 20000
             conn.readTimeout = 30000
@@ -371,17 +402,52 @@ object PackDownloader {
             val buf = ByteArray(64 * 1024)
             var downloaded = actualStart
             var lastNotify = 0L
+            // 低速检测：连续一段时间速度低于阈值就放弃这个通道，交给上层换源。
+            // 只看「最近窗口」的平均速度，避免刚开始的抖动误判。
+            val speedWindowMs = 8000L        // 观察窗口 8 秒
+            val slowThreshold = 180L * 1024  // 低于 180 KB/s 视为过慢
+            var winStart = System.currentTimeMillis()
+            var winBytes = 0L
+            var slowStrikes = 0               // 连续几次窗口都慢才放弃（防抖）
+            // 已经下了一半以上就不轻易放弃，否则前功尽弃
             conn.inputStream.use { ins ->
                 while (true) {
                     if (onCancel()) return false
                     val n = ins.read(buf)
                     if (n <= 0) break
+                    // 用户点了「换个源」：立刻放弃当前通道（已下字节会保留）
+                    if (consumeSwitchRequest()) {
+                        Log.i(TAG, "用户手动换源，放弃当前通道")
+                        return false
+                    }
                     raf.write(buf, 0, n)
                     downloaded += n
+                    winBytes += n
                     val now = System.currentTimeMillis()
                     if (now - lastNotify > 300) {   // 限流到 ~3 次/秒，避免 UI 卡
                         listener?.onProgress(downloaded, total)
+                        listener?.onSpeed(winBytes * 1000L / maxOf(1L, now - winStart))
                         lastNotify = now
+                    }
+                    // 每满一个窗口评估一次速度
+                    if (now - winStart >= speedWindowMs) {
+                        val elapsed = maxOf(1L, now - winStart)
+                        val bps = winBytes * 1000L / elapsed
+                        val remain = if (total > 0) total - downloaded else Long.MAX_VALUE
+                        // 剩余不足 20MB 时不再换源，避免最后关头白费
+                        val nearDone = remain in 0..(20L * 1024 * 1024)
+                        if (bps < slowThreshold && !nearDone) {
+                            slowStrikes++
+                            Log.w(TAG, "通道过慢：${bps / 1024} KB/s（第 $slowStrikes 次）")
+                            if (slowStrikes >= 2) {
+                                Log.w(TAG, "连续 2 个窗口过慢，放弃该通道，准备换源")
+                                return false   // 已下字节保留，上层会换下一个通道续传
+                            }
+                        } else {
+                            slowStrikes = 0
+                        }
+                        winStart = now
+                        winBytes = 0
                     }
                 }
             }
@@ -412,6 +478,8 @@ object PackDownloader {
                 raf?.close()
             } catch (_: Exception) {
             }
+            // 连接用完就取消登记，避免手动换源误断下一个通道的连接
+            if (activeConn === conn) activeConn = null
             try {
                 conn?.disconnect()
             } catch (_: Exception) {
