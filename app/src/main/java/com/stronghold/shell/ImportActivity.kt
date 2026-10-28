@@ -859,13 +859,17 @@ class ImportActivity : AppCompatActivity() {
         val packs = PackManager.listPacks(this)
         val same = packs.firstOrNull { it.version == info.version }
         val sizeMbText = "%.1f".format(asset.sizeMb)
+        val cur = Settings.load(this)
+        val keepText = if (cur.keepZipAfterInstall) "安装后保留压缩包" else "安装后删除压缩包"
         val msg = buildString {
             append("版本：v${info.version}\n")
             append("文件：${asset.name}\n")
             append("大小：$sizeMbText MB\n")
-            append("下载位置：应用专用目录（不占媒体库）\n\n")
+            append("当前位置：").append(shortDirName(cur.downloadMode)).append("\n")
+            append("安装后：").append(keepText).append("\n\n")
             if (same != null) append("注意：该版本已安装，将覆盖。\n")
-            append("完整包较大，建议在 Wi-Fi 下进行。")
+            append("完整包较大，建议在 Wi-Fi 下进行。\n")
+            append("点「开始下载」后会先选下载位置。")
         }
         AlertDialog.Builder(this)
             .setTitle("下载 v${info.version}")
@@ -878,8 +882,167 @@ class ImportActivity : AppCompatActivity() {
                     confirmIncremental(info, same)
                 }
             }
-            .setPositiveButton("开始下载") { _, _ -> doDownload(info, asset) }
+            .setPositiveButton("开始下载") { _, _ ->
+                pickDirThenDownload(info, asset)
+            }
             .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /**
+     * 申请写入公共 Download 目录所需权限。
+     * Android 11+ 需要「所有文件访问」权限，要去系统设置页手动开，
+     * 所以这里引导用户跳转，而不是弹普通权限框。
+     */
+    private fun ensureStoragePermission(onOk: () -> Unit) {
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            if (android.os.Environment.isExternalStorageManager()) {
+                onOk()
+                return
+            }
+            AlertDialog.Builder(this)
+                .setTitle("需要文件访问权限")
+                .setMessage(
+                    "要把游戏包保存到公共 Download 目录（这样你能在文件管理器里找到、也能直接分享），" +
+                        "需要授予「所有文件访问权限」。\n\n" +
+                        "点「去授权」后在系统页面找到本应用，打开开关，然后回来重新点下载即可。\n\n" +
+                        "如果不想授权，也可以选「应用私有目录」，功能不受影响，只是文件管理器看不到。"
+                )
+                .setPositiveButton("去授权") { _, _ ->
+                    try {
+                        val i = android.content.Intent(
+                            android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                            android.net.Uri.parse("package:" + packageName)
+                        )
+                        startActivity(i)
+                    } catch (e: Exception) {
+                        try {
+                            startActivity(android.content.Intent(
+                                android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                        } catch (e2: Exception) {
+                            toast("无法打开授权页面，请手动到系统设置里授权")
+                        }
+                    }
+                }
+                .setNegativeButton("取消", null)
+                .show()
+            return
+        }
+        if (android.os.Build.VERSION.SDK_INT >= 23) {
+            val need = android.Manifest.permission.WRITE_EXTERNAL_STORAGE
+            if (checkSelfPermission(need) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                onOk()
+            } else {
+                requestPermissions(arrayOf(need), 9101)
+            }
+        } else {
+            onOk()
+        }
+    }
+
+    /** 下载位置的中文短名 */
+    private fun shortDirName(mode: Int): String = when (mode) {
+        0 -> "应用私有目录"
+        2 -> "自定义路径"
+        else -> "公共 Download/StrongholdPacks"
+    }
+
+    /**
+     * 下载前先选位置：列出三种预设（可当场改），选完直接开始下载。
+     * 与设置页共用同一份 downloadMode / downloadPath。
+     */
+    private fun pickDirThenDownload(info: UpdateChecker.ReleaseInfo, asset: UpdateChecker.Asset) {
+        val cur = Settings.load(this)
+        val curLabel = PackDownloader.downloadDirLabel(this).replace("\n", "\n    ")
+        val items = arrayOf(
+            "应用私有目录",
+            "公共 Download/StrongholdPacks（文件管理器可见，推荐）",
+            "自定义路径…"
+        )
+        val checked = when (cur.downloadMode) {
+            0 -> 0
+            2 -> 2
+            else -> 1
+        }
+        AlertDialog.Builder(this)
+            .setTitle("选择下载位置")
+            .setMessage("当前：\n    $curLabel\n\n本次下载会保存到所选的目录。")
+            .setSingleChoiceItems(items, checked) { d, which ->
+                when (which) {
+                    0 -> {
+                        val p = Settings.load(this)
+                        p.downloadMode = 0
+                        Settings.save(this, p)
+                        d.dismiss()
+                        toast("已选：应用私有目录")
+                        doDownload(info, asset)
+                    }
+                    1 -> {
+                        val p = Settings.load(this)
+                        p.downloadMode = 1
+                        Settings.save(this, p)
+                        d.dismiss()
+                        ensureStoragePermission {
+                            toast("已选：公共 Download/StrongholdPacks")
+                            doDownload(info, asset)
+                        }
+                    }
+                    2 -> {
+                        d.dismiss()
+                        askCustomPathForDownload(cur.downloadPath) { ok ->
+                            if (ok) {
+                                ensureStoragePermission {
+                                    doDownload(info, asset)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /** 下载流程里用的自定义路径输入框，确认成功后回调 */
+    private fun askCustomPathForDownload(current: String, onDone: (Boolean) -> Unit) {
+        val et = android.widget.EditText(this)
+        et.setText(current)
+        et.setHint("/sdcard/Download/StrongholdPacks")
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        val wrap = android.widget.FrameLayout(this)
+        wrap.setPadding(pad, pad / 2, pad, 0)
+        wrap.addView(et)
+        AlertDialog.Builder(this)
+            .setTitle("自定义下载路径")
+            .setMessage("填一个手机上的绝对路径，例如：\n/sdcard/Download/StrongholdPacks")
+            .setView(wrap)
+            .setPositiveButton("确定并下载") { _, _ ->
+                val path = et.text.toString().trim()
+                if (path.isEmpty() || !path.startsWith("/")) {
+                    toast("路径要写完整，必须以 / 开头")
+                    onDone(false)
+                    return@setPositiveButton
+                }
+                val f = File(path)
+                val ok = try {
+                    if (!f.exists()) f.mkdirs()
+                    f.isDirectory && f.canWrite()
+                } catch (e: Exception) {
+                    false
+                }
+                if (!ok) {
+                    toast("这个路径建不出来或不可写，请换一个")
+                    onDone(false)
+                    return@setPositiveButton
+                }
+                val p = Settings.load(this)
+                p.downloadMode = 2
+                p.downloadPath = path
+                Settings.save(this, p)
+                toast("已设为：" + path)
+                onDone(true)
+            }
+            .setNegativeButton("取消") { _, _ -> onDone(false) }
             .show()
     }
 
@@ -1732,6 +1895,28 @@ class ImportActivity : AppCompatActivity() {
             .setView(sv)
             .setPositiveButton("关闭", null)
             .show()
+    }
+
+    // 权限结果回来：授予了就继续下载，没给就切回应用私有目录
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 9101) {
+            val granted = grantResults.isNotEmpty() &&
+                grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (granted) {
+                toast("已授权，可以重新点下载了")
+            } else {
+                val p = Settings.load(this)
+                p.downloadMode = 0
+                Settings.save(this, p)
+                toast("未授权，已改用应用私有目录")
+                switchNav(NAV_SETTINGS)
+            }
+        }
     }
 
     override fun onDestroy() {
