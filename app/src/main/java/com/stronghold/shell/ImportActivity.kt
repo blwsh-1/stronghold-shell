@@ -1707,36 +1707,48 @@ class ImportActivity : AppCompatActivity() {
             val dest = File(dir, asset.name)
             var lastUi = 0L
 
-            // 先体检通道，让用户看到哪个能用、自选优先通道，再开始下载
+            // 抢跑式探测：第一个成功的通道立刻开始下载，不再等最慢的死链，
+            // 也不再弹窗让用户先做选择（想手选可以走设置里的「下载通道体检」）
             if (preferredMirrors.isEmpty()) {
-                val chosen = java.util.concurrent.CountDownLatch(1)
-                var picked: List<Pair<String, String>> = emptyList()
-                var cancelled = false
-                ui.post {
-                    prepareMirrors(asset.downloadUrl, "选择下载通道") { order ->
-                        picked = order
-                        chosen.countDown()
+                ui.post { downloadLabel?.text = "正在连接服务器…" }
+                var winner: Pair<String, String>? = null
+                val winnerLatch = java.util.concurrent.CountDownLatch(1)
+                val probes = try {
+                    PackDownloader.probeRacing(asset.downloadUrl, 6000) { w ->
+                        winner = w
+                        winnerLatch.countDown()
                     }
+                } catch (e: Exception) {
+                    emptyList()
                 }
-                // 弹框被取消时也要放行，避免线程挂死
-                val deadline = System.currentTimeMillis() + 120000L
-                while (!chosen.await(300, java.util.concurrent.TimeUnit.MILLISECONDS)) {
-                    if (isFinishing || isDestroyed) {
-                        cancelled = true
-                        break
+                // 等第一个成功者（probeRacing 内部已有总超时，这里只做兜底）
+                try {
+                    winnerLatch.await(7, java.util.concurrent.TimeUnit.SECONDS)
+                } catch (_: Exception) {
+                }
+                FileLogger.log(
+                    "通道抢跑：" + probes.joinToString("，") {
+                        it.name + if (it.ok) "✅${it.costMs}ms" else "❌${it.reason}"
                     }
-                    // 兜底：两分钟内没做出选择就自己往下走，永不永久阻塞
-                    if (System.currentTimeMillis() > deadline) {
-                        cancelled = true
-                        break
+                )
+                val w = winner
+                if (w != null) {
+                    // 赢家排第一，其余可用通道跟在后面作为换源备选
+                    val order = ArrayList<Pair<String, String>>()
+                    order.add(w)
+                    for (p in probes) {
+                        if (p.ok && p.prefix != w.first) order.add(p.prefix to p.name)
                     }
+                    for (p in probes) {
+                        if (!p.ok) order.add(p.prefix to p.name)
+                    }
+                    preferredMirrors = order
+                    ui.post { downloadLabel?.text = "已连接 " + w.second + "，开始下载…" }
+                } else {
+                    // 一个都没成功：仍按原顺序逐个尝试，让失败信息更有意义
+                    preferredMirrors = PackDownloader.allAsIs()
+                    ui.post { downloadLabel?.text = "无可用通道，逐个尝试…" }
                 }
-                if (cancelled || picked.isEmpty()) {
-                    downloading = false
-                    ui.post { downloadCard?.visibility = View.GONE }
-                    return@execute
-                }
-                preferredMirrors = picked
             }
 
             val ok = PackDownloader.download(
