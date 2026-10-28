@@ -247,9 +247,7 @@ class ImportActivity : AppCompatActivity() {
         dlCard.addView(bar)
         // 下载中随时可手动换源：卡住或太慢时不用等，也不用取消重来
         val swBtn = UiKit.button(this, "🔄  太慢了？换个源", false) {
-            PackDownloader.requestSwitchMirror()
-            toast("正在切换下载源…（已下载的部分会保留）")
-            FileLogger.log("用户手动请求换源（已下 " + PackDownloader.fmtMb(curDownloadedBytes) + " MB）")
+            showSwitchMirrorDialog()
         }
         dlCard.addView(UiKit.spacer(this, 8f))
         dlCard.addView(swBtn)
@@ -1267,6 +1265,63 @@ class ImportActivity : AppCompatActivity() {
     }
 
     /**
+     * 下载中的「换个源」弹窗：列出所有通道的最近实测状态，
+     * 让用户自己指定换到哪一个，而不是只能盲目往后轮。
+     */
+    private fun showSwitchMirrorDialog() {
+        val probes = PackDownloader.lastProbeResult
+        if (probes.isEmpty()) {
+            // 还没测过：直接往后轮
+            PackDownloader.requestSwitchMirror()
+            toast("正在换到下一个通道…（已下载部分会保留）")
+            return
+        }
+        val list = android.widget.LinearLayout(this)
+        list.orientation = android.widget.LinearLayout.VERTICAL
+        val pad = (16 * resources.displayMetrics.density).toInt()
+        list.setPadding(pad, pad / 2, pad, pad / 2)
+
+        val head = android.widget.TextView(this)
+        head.text = "当前已下载 " + PackDownloader.fmtMb(curDownloadedBytes) + " MB\n点一项换过去（会续传，不用重下）："
+        head.textSize = 13f
+        list.addView(head)
+
+        var dlg: AlertDialog? = null
+        for (p in probes) {
+            val row = android.widget.TextView(this)
+            row.text = if (p.ok) {
+                "✅ " + p.name + "    " + p.costMs + "ms"
+            } else {
+                "❌ " + p.name + "    " + p.reason
+            }
+            row.textSize = 14f
+            row.setPadding(0, pad / 2, 0, pad / 2)
+            row.setOnClickListener {
+                if (!p.ok) {
+                    toast("这个通道上次测是不通的（" + p.reason + "），仍会尝试")
+                }
+                PackDownloader.requestSwitchMirrorTo(p.prefix, p.name)
+                FileLogger.log("用户指定换源到：" + p.name + "（已下 " + PackDownloader.fmtMb(curDownloadedBytes) + " MB）")
+                toast("正在切换到 " + p.name + "…")
+                dlg?.dismiss()
+            }
+            list.addView(row)
+        }
+
+        val sv = android.widget.ScrollView(this)
+        sv.addView(list)
+        dlg = AlertDialog.Builder(this)
+            .setTitle("选择下载通道")
+            .setView(sv)
+            .setNeutralButton("顺序换下一个") { _, _ ->
+                PackDownloader.requestSwitchMirror()
+                toast("正在换到下一个通道…")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    /**
      * 设置页里的“本地游戏包”：列出下载目录里已有的包，逐个体检，
      * 并给出处理选项（直接安装 / 重新下载 / 删除 / 打开目录）。
      * 专门解决“包其实下好了、但装不上又找不到在哪”这种情况。
@@ -1731,6 +1786,8 @@ class ImportActivity : AppCompatActivity() {
                         it.name + if (it.ok) "✅${it.costMs}ms" else "❌${it.reason}"
                     }
                 )
+                // 存下来：下载中打开「换个源」弹窗时，直接把这份状态列给用户看
+                PackDownloader.rememberProbe(probes)
                 val w = winner
                 if (w != null) {
                     // 赢家排第一，其余可用通道跟在后面作为换源备选
