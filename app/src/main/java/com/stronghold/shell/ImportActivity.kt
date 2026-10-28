@@ -49,6 +49,8 @@ class ImportActivity : AppCompatActivity() {
     private var downloading = false
     private var downloadLabel: TextView? = null
     private var downloadBar: View? = null
+    /** 本地游戏包列表弹框（点选某一行后需要关掉它） */
+    private var currentLocalDialog: AlertDialog? = null
     /** 最近一次测速排好序的镜像（下载时优先用） */
     private var preferredMirrors: List<Pair<String, String>> = emptyList()
     /** 本次准备下载哪种包（增量 / 完整 / 精简） */
@@ -1079,26 +1081,34 @@ class ImportActivity : AppCompatActivity() {
                         .show()
                     return@post
                 }
-                val sb = StringBuilder()
+                // 注意：AlertDialog 的 setMessage 和 setItems 互斥，同时用会导致列表不显示。
+                // 所以这里用自定义的列表视图，把文件名、状态、路径都放进每一行。
+                val list = android.widget.LinearLayout(this@ImportActivity)
+                list.orientation = android.widget.LinearLayout.VERTICAL
+                val pad = (16 * resources.displayMetrics.density).toInt()
+                list.setPadding(pad, pad / 2, pad, pad / 2)
                 for ((f, c) in checks) {
-                    sb.append(if (c.problem.isEmpty()) "✅ " else "❌ ").append(f.name).append("\n")
-                    sb.append("   大小 ").append(PackDownloader.fmtMb(c.size)).append(" MB")
-                    if (c.isZip) sb.append("，压缩包内 ").append(c.entries).append(" 个文件")
-                    sb.append("\n")
-                    if (c.problem.isNotEmpty()) sb.append("   问题：").append(c.problem).append("\n")
-                    sb.append("   ").append(f.absolutePath).append("\n\n")
-                }
-                val names = checks.map { (f, c) ->
-                    (if (c.problem.isEmpty()) "✅ " else "❌ ") + f.name + "（" +
-                        PackDownloader.fmtMB(c.size) + " MB）"
-                }.toTypedArray()
-                AlertDialog.Builder(this@ImportActivity)
-                    .setTitle("本地游戏包（点选处理）")
-                    .setMessage(sb.toString())
-                    .setItems(names) { _, which ->
-                        val (f, c) = checks[which]
+                    val row = android.widget.TextView(this@ImportActivity)
+                    val mark = if (c.problem.isEmpty()) "✅" else "❌"
+                    val txt = StringBuilder()
+                    txt.append(mark).append(" ").append(f.name).append("\n")
+                    txt.append("    大小 ").append(PackDownloader.fmtMb(c.size)).append(" MB")
+                    if (c.isZip) txt.append("，内 ").append(c.entries).append(" 个文件")
+                    if (c.problem.isNotEmpty()) txt.append("\n    问题：").append(c.problem)
+                    row.text = txt.toString()
+                    row.textSize = 13f
+                    row.setPadding(0, pad / 2, 0, pad / 2)
+                    row.setOnClickListener {
                         handleLocalPack(f, c)
+                        currentLocalDialog?.dismiss()
                     }
+                    list.addView(row)
+                }
+                val sv = android.widget.ScrollView(this@ImportActivity)
+                sv.addView(list)
+                currentLocalDialog = AlertDialog.Builder(this@ImportActivity)
+                    .setTitle("本地游戏包（点选处理）")
+                    .setView(sv)
                     .setPositiveButton("打开下载目录") { _, _ -> openDownloadDir() }
                     .setNegativeButton("关闭", null)
                     .show()
@@ -1226,9 +1236,15 @@ class ImportActivity : AppCompatActivity() {
     /** 打开下载目录（调系统文件管理器） */
     private fun openDownloadDir() {
         val dir = PackDownloader.downloadDir(this@ImportActivity)
+        // 包名不能写死：主版本是 com.stronghold.shell，实验版是 com.stronghold.shell.lab
+        val pkg = packageName
+        val docId = "primary%3AAndroid%2Fdata%2F" + pkg.replace("/", "%2F") + "%2Ffiles%2Fdownloads"
         try {
             val i = android.content.Intent(android.content.Intent.ACTION_VIEW)
-            i.setDataAndType(android.net.Uri.parse("content://com.android.externalstorage.documents/document/primary%3AAndroid%2Fdata%2Fcom.stronghold.shell.lab%2Ffiles%2Fdownloads"), "*/*")
+            i.setDataAndType(
+                android.net.Uri.parse("content://com.android.externalstorage.documents/document/" + docId),
+                "resource/folder"
+            )
             i.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
             startActivity(i)
             toast("目录：" + dir.absolutePath)
