@@ -574,6 +574,10 @@ class ImportActivity : AppCompatActivity() {
         val dr = UiKit.button(this, "🔧  运行环境诊断", true) { runDoctor() }
         tools.addView(dr)
         tools.addView(UiKit.spacer(this, 8f))
+        // 随时体检下载通道，不必等到真正下载时才知道源好坏
+        val mc = UiKit.button(this, "🌐  下载通道体检", false) { checkMirrorsNow() }
+        tools.addView(mc)
+        tools.addView(UiKit.spacer(this, 8f))
         val lg = UiKit.button(this, "📄  查看运行日志", false) { showLog() }
         tools.addView(lg)
         c.addView(tools, cardLp())
@@ -913,15 +917,29 @@ class ImportActivity : AppCompatActivity() {
             val dest = File(dir, asset.name)
             var lastUi = 0L
 
-            // 先测速，挑最快的镜像（6 镜像并发，几秒出结果）
+            // 先体检通道，让用户看到哪个能用、自选优先通道，再开始下载
             if (preferredMirrors.isEmpty()) {
-                ui.post { downloadLabel?.text = "正在测试镜像速度…" }
-                preferredMirrors = try {
-                    PackDownloader.probeMirrors(asset.downloadUrl)
-                } catch (e: Exception) {
-                    emptyList()
+                val chosen = java.util.concurrent.CountDownLatch(1)
+                var picked: List<Pair<String, String>> = emptyList()
+                var cancelled = false
+                ui.post {
+                    prepareMirrors(asset.downloadUrl, "选择下载通道") { order ->
+                        picked = order
+                        chosen.countDown()
+                    }
                 }
-                FileLogger.log("镜像测速完成：" + preferredMirrors.joinToString { it.second })
+                while (!chosen.await(300, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                    if (isFinishing || isDestroyed) {
+                        cancelled = true
+                        break
+                    }
+                }
+                if (cancelled || picked.isEmpty()) {
+                    downloading = false
+                    ui.post { downloadCard?.visibility = View.GONE }
+                    return@execute
+                }
+                preferredMirrors = picked
             }
 
             val ok = PackDownloader.download(
@@ -1024,6 +1042,132 @@ class ImportActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 设置页里的“下载通道体检”：拿最新版本完整包的地址，实测所有通道。
+     */
+    private fun checkMirrorsNow() {
+        toast("正在体检下载通道…")
+        io.execute {
+            // 优先用已知的更新信息；没有就用上游 latest 的完整包地址
+            var testUrl: String? = null
+            try {
+                val info = UpdateChecker.fetchLatest()
+                val a = info?.let { UpdateChecker.pickAsset(it, UpdateChecker.PackKind.FULL) }
+                testUrl = a?.downloadUrl
+            } catch (_: Exception) {
+            }
+            if (testUrl.isNullOrBlank()) {
+                testUrl = "https://github.com/sganggs/Stronghold-Protocol/releases/latest/download/Stronghold-Protocol-v0.3.3.zip"
+            }
+            val probes = try {
+                PackDownloader.probeAll(testUrl)
+            } catch (e: Exception) {
+                emptyList()
+            }
+            val sb = StringBuilder()
+            val okCount = probes.count { it.ok }
+            sb.append("共 ").append(probes.size).append(" 个通道，可用 ").append(okCount).append(" 个\n\n")
+            for (p in probes) {
+                if (p.ok) {
+                    sb.append("✅ ").append(p.name).append("   ").append(p.costMs).append("ms\n")
+                } else {
+                    sb.append("❌ ").append(p.name).append("   ").append(p.reason).append("\n")
+                }
+            }
+            if (okCount == 0) {
+                sb.append("\n全部通道都不可用。请检查网络，或稍后重试。\n")
+            }
+            sb.append("\n检测地址：\n").append(testUrl)
+            FileLogger.log("手动通道体检：" + sb.toString().replace("\n", " / "))
+            ui.post {
+                AlertDialog.Builder(this@ImportActivity)
+                    .setTitle("下载通道体检结果")
+                    .setMessage(sb.toString())
+                    .setPositiveButton("知道了", null)
+                    .show()
+            }
+        }
+    }
+
+    /**
+     * 在后台体检全部下载通道，然后弹框把结果全列出来让用户选。
+     * 用户选完之后，onReady 拿到的就是最终优先顺序。
+     */
+    private fun prepareMirrors(
+        downloadUrl: String,
+        title: String,
+        onReady: (List<Pair<String, String>>) -> Unit
+    ) {
+        ui.post {
+            downloadCard?.visibility = View.VISIBLE
+            downloadLabel?.text = "正在检测下载通道…"
+        }
+        io.execute {
+            val probes = try {
+                PackDownloader.probeAll(downloadUrl)
+            } catch (e: Exception) {
+                emptyList()
+            }
+            FileLogger.log(
+                "通道体检：" + probes.joinToString("，") {
+                    it.name + if (it.ok) "✅${it.costMs}ms" else "❌${it.reason}"
+                }
+            )
+            ui.post {
+                downloadCard?.visibility = View.GONE
+                val sb = StringBuilder()
+                if (probes.none { it.ok }) {
+                    sb.append("本次没有任何通道可用。\n\n")
+                } else {
+                    sb.append("可用通道（点选优先使用）：\n")
+                }
+                for (p in probes) {
+                    if (p.ok) {
+                        sb.append("✅ ").append(p.name).append("  ").append(p.costMs).append("ms\n")
+                    } else {
+                        sb.append("❌ ").append(p.name).append("  ").append(p.reason).append("\n")
+                    }
+                }
+                val builder = AlertDialog.Builder(this@ImportActivity)
+                builder.setTitle(title)
+                builder.setMessage(sb.toString())
+                builder.setCancelable(false)
+                if (probes.isEmpty()) {
+                    builder.setPositiveButton("直接尝试下载") { _, _ ->
+                        preferredMirrors = emptyList()
+                        onReady(PackDownloader.allAsIs())
+                    }
+                } else {
+                    val names = probes.map { it.name }.toTypedArray()
+                    builder.setItems(names) { _, which ->
+                        val chosen = probes[which]
+                        if (!chosen.ok) {
+                            toast("该通道当前不可用（" + chosen.reason + "），会按顺序尝试其它通道")
+                        }
+                        val order = ArrayList<Pair<String, String>>()
+                        order.add(chosen.prefix to chosen.name)
+                        for (p in probes) {
+                            if (p.ok && p.prefix != chosen.prefix) order.add(p.prefix to p.name)
+                        }
+                        for (p in probes) {
+                            if (!p.ok) order.add(p.prefix to p.name)
+                        }
+                        preferredMirrors = order
+                        onReady(order)
+                    }
+                }
+                builder.setNeutralButton("不限通道，直接下载") { _, _ ->
+                    preferredMirrors = emptyList()
+                    onReady(PackDownloader.allAsIs())
+                }
+                builder.setNegativeButton("取消") { _, _ ->
+                    toast("已取消下载")
+                }
+                builder.show()
+            }
+        }
+    }
+
     private fun doDownload(info: UpdateChecker.ReleaseInfo, asset: UpdateChecker.Asset) {
         downloading = true
         downloadCard?.visibility = View.VISIBLE
@@ -1034,25 +1178,30 @@ class ImportActivity : AppCompatActivity() {
             val dest = File(dir, asset.name)
             var lastUi = 0L
 
-            // 镜像并发测速：7 个通道各发一个小请求，几秒内挑出最快的
+            // 先体检通道，让用户看到哪个能用、自选优先通道，再开始下载
             if (preferredMirrors.isEmpty()) {
+                val chosen = java.util.concurrent.CountDownLatch(1)
+                var picked: List<Pair<String, String>> = emptyList()
+                var cancelled = false
                 ui.post {
-                    downloadLabel?.text = "正在测试下载通道…（最多 4 秒）"
-                    (downloadBar as? View)?.let { v ->
-                        try {
-                            val m = v.javaClass.getMethod("setProgress", Float::class.java)
-                            m.invoke(v, 0f)
-                        } catch (_: Exception) {
-                        }
+                    prepareMirrors(asset.downloadUrl, "选择下载通道") { order ->
+                        picked = order
+                        chosen.countDown()
                     }
                 }
-                preferredMirrors = try {
-                    PackDownloader.probeMirrors(asset.downloadUrl)
-                } catch (e: Exception) {
-                    emptyList()
+                // 弹框被取消时也要放行，避免线程挂死
+                while (!chosen.await(300, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                    if (isFinishing || isDestroyed) {
+                        cancelled = true
+                        break
+                    }
                 }
-                val best = preferredMirrors.firstOrNull()?.second ?: "无（将逐个尝试）"
-                FileLogger.log("镜像测速完成，最快：$best")
+                if (cancelled || picked.isEmpty()) {
+                    downloading = false
+                    ui.post { downloadCard?.visibility = View.GONE }
+                    return@execute
+                }
+                preferredMirrors = picked
             }
 
             val ok = PackDownloader.download(
