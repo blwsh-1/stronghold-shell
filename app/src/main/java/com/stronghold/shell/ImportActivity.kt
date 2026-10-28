@@ -51,6 +51,8 @@ class ImportActivity : AppCompatActivity() {
     private var downloadBar: View? = null
     /** 本地游戏包列表弹框（点选某一行后需要关掉它） */
     private var currentLocalDialog: AlertDialog? = null
+    /** 下载通道选择弹框（点选后需要关掉它） */
+    private var currentChannelDialog: AlertDialog? = null
     /** 最近一次测速排好序的镜像（下载时优先用） */
     private var preferredMirrors: List<Pair<String, String>> = emptyList()
     /** 本次准备下载哪种包（增量 / 完整 / 精简） */
@@ -934,8 +936,14 @@ class ImportActivity : AppCompatActivity() {
                         chosen.countDown()
                     }
                 }
+                val deadline = System.currentTimeMillis() + 120000L
                 while (!chosen.await(300, java.util.concurrent.TimeUnit.MILLISECONDS)) {
                     if (isFinishing || isDestroyed) {
+                        cancelled = true
+                        break
+                    }
+                    // 兜底：两分钟内没做出选择就自己往下走，永不永久阻塞
+                    if (System.currentTimeMillis() > deadline) {
                         cancelled = true
                         break
                     }
@@ -1341,51 +1349,64 @@ class ImportActivity : AppCompatActivity() {
                 if (probes.none { it.ok }) {
                     sb.append("本次没有任何通道可用。\n\n")
                 } else {
-                    sb.append("可用通道（点选优先使用）：\n")
+                    sb.append("点一项作为优先通道：\n\n")
                 }
+                // 同样不能用 setMessage + setItems：两者互斥，列表会被吞掉，
+                // 那样用户点不到任何东西，后台下载线程会在 latch 上永久卡住。
+                val list = android.widget.LinearLayout(this@ImportActivity)
+                list.orientation = android.widget.LinearLayout.VERTICAL
+                val pad = (16 * resources.displayMetrics.density).toInt()
+                list.setPadding(pad, pad / 2, pad, pad / 2)
+                val head = android.widget.TextView(this@ImportActivity)
+                head.text = sb.toString()
+                head.textSize = 13f
+                list.addView(head)
                 for (p in probes) {
-                    if (p.ok) {
-                        sb.append("✅ ").append(p.name).append("  ").append(p.costMs).append("ms\n")
+                    val row = android.widget.TextView(this@ImportActivity)
+                    row.text = if (p.ok) {
+                        "✅ " + p.name + "    " + p.costMs + "ms"
                     } else {
-                        sb.append("❌ ").append(p.name).append("  ").append(p.reason).append("\n")
+                        "❌ " + p.name + "    " + p.reason
                     }
+                    row.textSize = 14f
+                    row.setPadding(0, pad / 2, 0, pad / 2)
+                    row.setOnClickListener {
+                        if (!p.ok) {
+                            toast("该通道当前不可用（" + p.reason + "），会按顺序尝试其它通道")
+                        }
+                        val order = ArrayList<Pair<String, String>>()
+                        order.add(p.prefix to p.name)
+                        for (q in probes) {
+                            if (q.ok && q.prefix != p.prefix) order.add(q.prefix to q.name)
+                        }
+                        for (q in probes) {
+                            if (!q.ok) order.add(q.prefix to q.name)
+                        }
+                        preferredMirrors = order
+                        currentChannelDialog?.dismiss()
+                        onReady(order)
+                    }
+                    list.addView(row)
                 }
-                val builder = AlertDialog.Builder(this@ImportActivity)
-                builder.setTitle(title)
-                builder.setMessage(sb.toString())
-                builder.setCancelable(false)
-                if (probes.isEmpty()) {
-                    builder.setPositiveButton("直接尝试下载") { _, _ ->
+                val sv = android.widget.ScrollView(this@ImportActivity)
+                sv.addView(list)
+                val bd = AlertDialog.Builder(this@ImportActivity)
+                    .setTitle(title)
+                    .setView(sv)
+                    .setNeutralButton("不限通道，直接下载") { _, _ ->
                         preferredMirrors = emptyList()
                         onReady(PackDownloader.allAsIs())
                     }
-                } else {
-                    val names = probes.map { it.name }.toTypedArray()
-                    builder.setItems(names) { _, which ->
-                        val chosen = probes[which]
-                        if (!chosen.ok) {
-                            toast("该通道当前不可用（" + chosen.reason + "），会按顺序尝试其它通道")
-                        }
-                        val order = ArrayList<Pair<String, String>>()
-                        order.add(chosen.prefix to chosen.name)
-                        for (p in probes) {
-                            if (p.ok && p.prefix != chosen.prefix) order.add(p.prefix to p.name)
-                        }
-                        for (p in probes) {
-                            if (!p.ok) order.add(p.prefix to p.name)
-                        }
-                        preferredMirrors = order
-                        onReady(order)
+                    .setNegativeButton("取消") { _, _ ->
+                        toast("已取消下载")
                     }
-                }
-                builder.setNeutralButton("不限通道，直接下载") { _, _ ->
-                    preferredMirrors = emptyList()
-                    onReady(PackDownloader.allAsIs())
-                }
-                builder.setNegativeButton("取消") { _, _ ->
-                    toast("已取消下载")
-                }
-                builder.show()
+                    // 关键兜底：用户按返回键关掉弹框时，也必须放行后台线程，
+                    // 否则下载协程会永远等在 latch 上
+                    .setOnCancelListener {
+                        onReady(emptyList())
+                    }
+                    .setCancelable(true)
+                currentChannelDialog = bd.show()
             }
         }
     }
@@ -1412,8 +1433,14 @@ class ImportActivity : AppCompatActivity() {
                     }
                 }
                 // 弹框被取消时也要放行，避免线程挂死
+                val deadline = System.currentTimeMillis() + 120000L
                 while (!chosen.await(300, java.util.concurrent.TimeUnit.MILLISECONDS)) {
                     if (isFinishing || isDestroyed) {
+                        cancelled = true
+                        break
+                    }
+                    // 兜底：两分钟内没做出选择就自己往下走，永不永久阻塞
+                    if (System.currentTimeMillis() > deadline) {
                         cancelled = true
                         break
                     }
