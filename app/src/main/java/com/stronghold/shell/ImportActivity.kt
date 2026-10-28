@@ -70,7 +70,7 @@ class ImportActivity : AppCompatActivity() {
 
         // 首次进入总是停在启动器界面（用户要看新 UI / 版本列表）。
         // 只有用户主动点「启动游戏」才跳转 —— 之前的自动跳转会让启动器一闪而过。
-        if (savedInstanceState == null && Settings.load(this).autoCheckUpdate) {
+        if (savedInstanceState == null && Settings.load(this).autoCheckPack) {
             checkUpdate(silent = true)
         }
     }
@@ -552,11 +552,20 @@ class ImportActivity : AppCompatActivity() {
         c.addView(UiKit.spacer(this, 10f))
 
         c.addView(settingRow(
-            "启动时检查更新", if (cur.autoCheckUpdate) "开" else "关",
-            "打开启动器时查询 GitHub 最新版本"
-        ) { chooseString("检查更新", if (cur.autoCheckUpdate) "on" else "off",
+            "启动时检查游戏包更新", if (cur.autoCheckPack) "开" else "关",
+            "打开启动器时查询上游 GitHub 最新游戏包版本"
+        ) { chooseString("游戏包更新", if (cur.autoCheckPack) "on" else "off",
             listOf("on", "off"), listOf("开", "关")) { v ->
-            val p = Settings.load(this); p.autoCheckUpdate = (v == "on"); Settings.save(this, p)
+            val p = Settings.load(this); p.autoCheckPack = (v == "on"); Settings.save(this, p)
+            switchNav(NAV_SETTINGS)
+        } }, cardLp())
+
+        c.addView(settingRow(
+            "启动时检查启动器更新", if (cur.autoCheckApp) "开" else "关",
+            "打开启动器时查询本项目最新版本（含一键下载安装）"
+        ) { chooseString("启动器更新", if (cur.autoCheckApp) "on" else "off",
+            listOf("on", "off"), listOf("开", "关")) { v ->
+            val p = Settings.load(this); p.autoCheckApp = (v == "on"); Settings.save(this, p)
             switchNav(NAV_SETTINGS)
         } }, cardLp())
 
@@ -1027,13 +1036,22 @@ class ImportActivity : AppCompatActivity() {
 
             // 镜像并发测速：7 个通道各发一个小请求，几秒内挑出最快的
             if (preferredMirrors.isEmpty()) {
-                ui.post { downloadLabel?.text = "正在测试镜像速度…" }
+                ui.post {
+                    downloadLabel?.text = "正在测试下载通道…（最多 4 秒）"
+                    (downloadBar as? View)?.let { v ->
+                        try {
+                            val m = v.javaClass.getMethod("setProgress", Float::class.java)
+                            m.invoke(v, 0f)
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
                 preferredMirrors = try {
                     PackDownloader.probeMirrors(asset.downloadUrl)
                 } catch (e: Exception) {
                     emptyList()
                 }
-                val best = preferredMirrors.firstOrNull()?.second ?: "无"
+                val best = preferredMirrors.firstOrNull()?.second ?: "无（将逐个尝试）"
                 FileLogger.log("镜像测速完成，最快：$best")
             }
 
