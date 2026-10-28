@@ -996,20 +996,20 @@ class ImportActivity : AppCompatActivity() {
                         p.downloadMode = 1
                         Settings.save(this, p)
                         d.dismiss()
-                        ensureStoragePermission {
+                        ensureStoragePermission(onOk = {
                             toast("已选：公共 Download/StrongholdPacks")
                             doDownload(info, asset)
-                        }
+                        })
                     }
                     2 -> {
                         d.dismiss()
                         // 先确保有文件访问权限，再让用户填路径：
                         // 没权限时 canWrite() 必然 false，会导致自定义路径永远设不成
-                        ensureStoragePermission {
+                        ensureStoragePermission(onOk = {
                             askCustomPathForDownload(cur.downloadPath) { ok ->
                                 if (ok) doDownload(info, asset)
                             }
-                        }
+                        })
                     }
                 }
             }
