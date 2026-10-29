@@ -64,13 +64,27 @@ jobs:
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "启动器版本 = $V"
 
+      # ⚠️ 2026-10 起 ubuntu-latest 镜像自带全局 Gradle 已升到 9.x，
+      #    而本项目 AGP 8.5.2 只支持 Gradle 8.x（AGP 用到的 InternalProblems
+      #    内部 API 在 Gradle 9.6 被移除）。原来的写法是直接用全局 gradle 跑
+      #    `gradle wrapper --gradle-version 8.7`，但这条命令会**先配置整个项目**
+      #    （解析 settings.gradle.kts → 加载 AGP），于是在配置阶段就炸了，
+      #    `--gradle-version 8.7` 根本来不及生效。
+      #    改为在临时空目录里生成 wrapper，完全不触碰本项目的构建脚本。
       - name: 生成 Gradle Wrapper（若缺失）
         run: |
           if [ ! -f ./gradlew ]; then
-            echo "==> gradlew 缺失，用全局 gradle 生成 wrapper"
-            gradle wrapper --gradle-version 8.7
+            echo "==> gradlew 缺失，在临时空目录生成 wrapper（避免用 Gradle 9 配置本项目）"
+            TMP=$(mktemp -d)
+            echo 'rootProject.name = "wrapper-gen"' > "$TMP/settings.gradle.kts"
+            ( cd "$TMP" && gradle wrapper --gradle-version 8.7 --distribution-type bin )
+            cp "$TMP/gradlew" "$TMP/gradlew.bat" .
+            mkdir -p gradle/wrapper
+            cp "$TMP/gradle/wrapper/gradle-wrapper.jar" gradle/wrapper/
+            rm -rf "$TMP"
           fi
           chmod +x ./gradlew
+          ./gradlew --version
 
       # ⭐ 固定签名：从 Secrets 还原 keystore，保证每次构建签名的证书一致，
       #    这样后续版本可以「覆盖升级」而不必卸载（不丢已导入的游戏包）。
