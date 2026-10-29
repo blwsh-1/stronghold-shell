@@ -74,6 +74,7 @@ class ImportActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         FileLogger.init(this)
+        CrashGuard.install(this)
         buildShell()
 
         // 首次进入总是停在启动器界面（用户要看新 UI / 版本列表）。
@@ -343,8 +344,24 @@ class ImportActivity : AppCompatActivity() {
             .setNegativeButton("取消", null)
             .show()
     }
+    /**
+     * 主线程安全的 toast。
+     *
+     * 【为什么必须兜这一层】io 是 Executors.newSingleThreadExecutor()，它创建的工作线程
+     * **没有 Looper**。在 Android 10 及更早版本上，从这种线程直接 Toast.show() 会抛
+     *   RuntimeException: Can't toast on a thread that has not called Looper.prepare()
+     * 而这个异常通常发生在 io.execute { } 的 lambda 里、不在任何 try 之内 ——
+     * 工作线程被终止，默认异常处理器接管，进程直接死掉 = 闪退。
+     *
+     * 所以统一在这里判一次线程：主线程直接弹，其它线程 post 回主线程再弹。
+     * 调用方就不用再各自记得包 ui.post 了。
+     */
     private fun toast(msg: String) {
-        Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+        } else {
+            ui.post { Toast.makeText(this, msg, Toast.LENGTH_SHORT).show() }
+        }
     }
 
     // ==================== 插件页 ====================
@@ -723,124 +740,133 @@ class ImportActivity : AppCompatActivity() {
     private fun doInstallPack(uri: Uri) {
         toast("正在检查包…")
         io.execute {
-            val kind = PackUpdater.detect(this@ImportActivity, uri)
+            runCatching {
+                // 先把文件名和体积查出来：文件名能判增量包，体积能判完整包，
+                // 两条都是零成本，能省掉「顺序扫 4 万个 zip 条目」那一大段等待。
+                val (pkgName, pkgSize) = PackUpdater.queryMeta(this@ImportActivity, uri)
+                val kind = PackUpdater.detect(this@ImportActivity, uri, pkgName, pkgSize)
 
-            // ---------- 增量包 → 覆盖到已装版本上 ----------
-            if (kind == PackUpdater.ZipKind.UPDATE) {
-                val active = PackManager.activeDir(this@ImportActivity)
-                if (active == null) {
-                    ui.post { toast("这是增量包，本地还没有完整安装；请先导入完整包") }
-                    return@execute
-                }
-                if (!File(active, "node_modules").isDirectory) {
-                    ui.post { toast("当前版本不完整（缺 node_modules），请先导入完整包") }
-                    return@execute
-                }
-                val from = PackManager.readVersionFrom(active) ?: "未知"
+                // ---------- 增量包 → 覆盖到已装版本上 ----------
+                if (kind == PackUpdater.ZipKind.UPDATE) {
+                    val active = PackManager.activeDir(this@ImportActivity)
+                    if (active == null) {
+                        ui.post { toast("这是增量包，本地还没有完整安装；请先导入完整包") }
+                        return@execute
+                    }
+                    if (!File(active, "node_modules").isDirectory) {
+                        ui.post { toast("当前版本不完整（缺 node_modules），请先导入完整包") }
+                        return@execute
+                    }
+                    val from = PackManager.readVersionFrom(active) ?: "未知"
 
-                val latch = java.util.concurrent.CountDownLatch(1)
-                var go = false
-                ui.post {
-                    AlertDialog.Builder(this@ImportActivity)
-                        .setTitle("检测到增量包")
-                        .setMessage(
-                            "本地当前：v$from\n\n" +
-                                "增量包只含改动的文件，会覆盖到 v$from 上。\n" +
-                                "覆盖前自动备份，按 UPDATE.json 校验 from 与 sha256，失败自动回滚。\n\n" +
-                                "⚠️ 只适用于紧邻的上一版；不匹配会被直接拒绝（不动任何文件）。\n" +
-                                "跨版本请用「下载最新」，它会自动逐级升。"
-                        )
-                        .setPositiveButton("开始覆盖") { _, _ -> go = true; latch.countDown() }
-                        .setNegativeButton("取消") { _, _ -> latch.countDown() }
-                        .setOnCancelListener { latch.countDown() }
-                        .show()
-                }
-                latch.await()
-                if (!go) return@execute
-
-                ui.post { toast("正在覆盖，请勿退出…") }
-                val r = PackUpdater.applyOverlay(this@ImportActivity, uri) { stage ->
-                    ui.post { toast(stage) }
-                }
-                ui.post {
-                    if (r.ok) {
-                        toast("增量升级完成：v${r.toVersion}")
-                        updateInfo = null
-                        switchNav(NAV_HOME)
-                    } else {
+                    val latch = java.util.concurrent.CountDownLatch(1)
+                    var go = false
+                    ui.post {
                         AlertDialog.Builder(this@ImportActivity)
-                            .setTitle("增量升级失败")
+                            .setTitle("检测到增量包")
                             .setMessage(
-                                r.message + "\n\n已回滚到 v${r.fromVersion ?: "原版本"}。\n" +
-                                    "跨版本请改用完整包或「下载最新」。"
+                                "本地当前：v$from\n\n" +
+                                    "增量包只含改动的文件，会覆盖到 v$from 上。\n" +
+                                    "覆盖前自动备份，按 UPDATE.json 校验 from 与 sha256，失败自动回滚。\n\n" +
+                                    "⚠️ 只适用于紧邻的上一版；不匹配会被直接拒绝（不动任何文件）。\n" +
+                                    "跨版本请用「下载最新」，它会自动逐级升。"
+                            )
+                            .setPositiveButton("开始覆盖") { _, _ -> go = true; latch.countDown() }
+                            .setNegativeButton("取消") { _, _ -> latch.countDown() }
+                            .setOnCancelListener { latch.countDown() }
+                            .show()
+                    }
+                    latch.await()
+                    if (!go) return@execute
+
+                    ui.post { toast("正在覆盖，请勿退出…") }
+                    val r = PackUpdater.applyOverlay(this@ImportActivity, uri) { stage ->
+                        ui.post { toast(stage) }
+                    }
+                    ui.post {
+                        if (r.ok) {
+                            toast("增量升级完成：v${r.toVersion}")
+                            updateInfo = null
+                            switchNav(NAV_HOME)
+                        } else {
+                            AlertDialog.Builder(this@ImportActivity)
+                                .setTitle("增量升级失败")
+                                .setMessage(
+                                    r.message + "\n\n已回滚到 v${r.fromVersion ?: "原版本"}。\n" +
+                                        "跨版本请改用完整包或「下载最新」。"
+                                )
+                                .setPositiveButton("知道了", null)
+                                .show()
+                        }
+                    }
+                    return@execute
+                }
+
+                // ---------- 精简包 / 源码包 → 明确拒绝 ----------
+                if (kind == PackUpdater.ZipKind.UNKNOWN) {
+                    ui.post {
+                        AlertDialog.Builder(this@ImportActivity)
+                            .setTitle("这不是可用的游戏包")
+                            .setMessage(
+                                "包里既没有 node_modules（完整包），\n" +
+                                    "也没有 UPDATE.json（增量包）。\n\n" +
+                                    "多半是 lite 精简包或源码包，请换完整包。"
                             )
                             .setPositiveButton("知道了", null)
                             .show()
                     }
-                }
-                return@execute
-            }
-
-            // ---------- 精简包 / 源码包 → 明确拒绝 ----------
-            if (kind == PackUpdater.ZipKind.UNKNOWN) {
-                ui.post {
-                    AlertDialog.Builder(this@ImportActivity)
-                        .setTitle("这不是可用的游戏包")
-                        .setMessage(
-                            "包里既没有 node_modules（完整包），\n" +
-                                "也没有 UPDATE.json（增量包）。\n\n" +
-                                "多半是 lite 精简包或源码包，请换完整包。"
-                        )
-                        .setPositiveButton("知道了", null)
-                        .show()
-                }
-                return@execute
-            }
-
-            // ---------- 完整包 → 原逻辑 ----------
-            toast("正在导入，请勿退出…")
-            var tmp: File? = null
-            try {
-                val root = PackManager.packsRoot(this@ImportActivity)
-                val stage = File(root, ".incoming")
-                stage.deleteRecursively()
-                stage.mkdirs()
-                tmp = stage
-
-                ZipInstaller.extract(this@ImportActivity, uri, stage)
-                // 判断是否有单层顶层目录（GitHub zip 通常含 Stronghold-Protocol/）
-                val kids = stage.listFiles()?.filter { it.name != "__MACOSX" } ?: emptyList()
-                val gameDir: File = if (kids.size == 1 && kids[0].isDirectory) kids[0] else stage
-
-                val version = PackManager.readVersionFrom(gameDir)
-                if (version == null) {
-                    ui.post { toast("不是有效的游戏包（缺少 package.json）") }
-                    return@execute
-                }
-                if (!File(gameDir, "node_modules").isDirectory) {
-                    ui.post { toast("缺 node_modules，请用完整包而非 lite/源码包") }
-                    return@execute
-                }
-                if (!File(gameDir, "server").exists() && !File(gameDir, "index.js").exists()) {
-                    ui.post { toast("包结构不完整（缺少 server/）") }
                     return@execute
                 }
 
-                val id = PackManager.register(
-                    this@ImportActivity, gameDir, version, source = "local", setActive = true
-                )
-                FileLogger.log("导入游戏包成功：$id (v$version)")
-                ui.post {
-                    toast("导入成功：v$version")
-                    updateInfo = null
-                    switchNav(NAV_HOME)
+                // ---------- 完整包 → 原逻辑 ----------
+                toast("正在导入，请勿退出…")
+                var tmp: File? = null
+                try {
+                    val root = PackManager.packsRoot(this@ImportActivity)
+                    val stage = File(root, ".incoming")
+                    stage.deleteRecursively()
+                    stage.mkdirs()
+                    tmp = stage
+
+                    ZipInstaller.extract(this@ImportActivity, uri, stage)
+                    // 判断是否有单层顶层目录（GitHub zip 通常含 Stronghold-Protocol/）
+                    val kids = stage.listFiles()?.filter { it.name != "__MACOSX" } ?: emptyList()
+                    val gameDir: File = if (kids.size == 1 && kids[0].isDirectory) kids[0] else stage
+
+                    val version = PackManager.readVersionFrom(gameDir)
+                    if (version == null) {
+                        ui.post { toast("不是有效的游戏包（缺少 package.json）") }
+                        return@execute
+                    }
+                    if (!File(gameDir, "node_modules").isDirectory) {
+                        ui.post { toast("缺 node_modules，请用完整包而非 lite/源码包") }
+                        return@execute
+                    }
+                    if (!File(gameDir, "server").exists() && !File(gameDir, "index.js").exists()) {
+                        ui.post { toast("包结构不完整（缺少 server/）") }
+                        return@execute
+                    }
+
+                    val id = PackManager.register(
+                        this@ImportActivity, gameDir, version, source = "local", setActive = true
+                    )
+                    FileLogger.log("导入游戏包成功：$id (v$version)")
+                    ui.post {
+                        toast("导入成功：v$version")
+                        updateInfo = null
+                        switchNav(NAV_HOME)
+                    }
+                } catch (e: Exception) {
+                    FileLogger.log("导入游戏包失败：${e.message}")
+                    val reason = e.message ?: "未知错误"
+                    ui.post { toast("导入失败：$reason") }
+                } finally {
+                    tmp?.deleteRecursively()
                 }
-            } catch (e: Exception) {
-                FileLogger.log("导入游戏包失败：${e.message}")
-                val reason = e.message ?: "未知错误"
-                ui.post { toast("导入失败：$reason") }
-            } finally {
-                tmp?.deleteRecursively()
+            }.onFailure { e ->
+                // 兜住探测 / 分支判断阶段的任何未预料异常，绝不让 io 线程裸崩
+                FileLogger.log("导入流程异常：" + (e.message ?: e.javaClass.simpleName))
+                ui.post { toast("导入异常：" + (e.message ?: "未知错误")) }
             }
         }
     }

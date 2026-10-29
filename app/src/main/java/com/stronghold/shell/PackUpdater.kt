@@ -2,6 +2,7 @@ package com.stronghold.shell
 
 import android.content.Context
 import android.net.Uri
+import android.provider.OpenableColumns
 import android.util.Log
 import org.json.JSONObject
 import java.io.File
@@ -56,8 +57,15 @@ object PackUpdater {
 
     enum class ZipKind { FULL, UPDATE, UNKNOWN }
 
-    private const val MAX_SCAN_ENTRIES = 800
-    private const val MAX_SCAN_BYTES = 80L * 1024 * 1024
+    /**
+     * 超过这个体积必然是完整包。
+     * 实测（v0.3.3）：完整包 861 MB / 41212 条目；增量包最大 20.8 MB；lite 28.9 MB。
+     * 差一个数量级，所以 100 MB 这条线足够安全。
+     */
+    private const val BIG_PACK_BYTES = 100L * 1024 * 1024
+
+    private const val MAX_SCAN_ENTRIES = 600
+    private const val SCAN_TIME_BUDGET_MS = 8000L
 
     /**
      * 覆盖时**永远不碰**的目录。
@@ -72,24 +80,80 @@ object PackUpdater {
     // ==================== 包类型判定 ====================
 
     /**
-     * 判定 zip 是完整包还是增量包。
-     *   1. 文件名含 "-update"           → 增量包（上游命名固定）
-     *   2. 包内有 UPDATE.json           → 增量包（决定性证据，只有 update 包带）
-     *   3. 包内有 node_modules/<包>/... → 完整包（update 包只有 .package-lock.json）
-     *   4. 都没有                       → 未知（lite / 源码包）
+     * 一次查出文件名与字节数，给 [detect] 用。查不到就返回 (null, -1)，绝不抛异常。
      *
-     * ZipInputStream 必须解压完条目才能读下一个名字，所以扫描有上限；
-     * 完整包默认就走 FULL，扫不到证据也不影响判断。
+     * 注意：`ACTION_OPEN_DOCUMENT` 拿到的 Uri 不是文件路径，只能靠 ContentResolver 查；
+     * `uri.lastPathSegment` 在很多 provider 上是一串数字 id，靠它判包类型会误判。
      */
-    fun detect(context: Context, uri: Uri, fileName: String? = null): ZipKind {
+    fun queryMeta(context: Context, uri: Uri): Pair<String?, Long> {
+        var name: String? = null
+        var size = -1L
+        try {
+            context.contentResolver.query(
+                uri,
+                arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
+                null, null, null
+            )?.use { c ->
+                if (c.moveToFirst()) {
+                    val ni = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if (ni >= 0 && !c.isNull(ni)) name = c.getString(ni)
+                    val si = c.getColumnIndex(OpenableColumns.SIZE)
+                    if (si >= 0 && !c.isNull(si)) size = c.getLong(si)
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "查询文件信息失败：${e.message}")
+        }
+        // 有些 provider 不返回 SIZE 列，退一步用文件描述符的 statSize
+        if (size <= 0) {
+            try {
+                context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                    if (pfd.statSize > 0) size = pfd.statSize
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "statSize 取值失败：${e.message}")
+            }
+        }
+        return name to size
+    }
+
+    /**
+     * 判定 zip 是完整包还是增量包。**按代价从低到高，能不问就不问**：
+     *
+     *   ① 文件名含 "-update"   → 增量包（上游命名固定，零成本）
+     *   ② 体积 >= 100 MB       → 完整包（零成本，见 [BIG_PACK_BYTES]）
+     *   ③ 剩下的小包才顺序扫条目：
+     *        · 见到 UPDATE.json          → 增量包
+     *        · 见到 >= 20 个 node_modules 文件 → 完整包
+     *        · 都没有                    → 未知（lite / 源码包）
+     *
+     * 【为什么 ② 必须放在扫描之前】
+     * ZipInputStream 只能顺序前进，读到第 n 个条目就得先把前 n-1 个的数据全部跳过
+     * （deflate 的要真解压）。完整包 41212 个条目、前几条是 tools/ 而不是 node_modules，
+     * 光为了"看到 node_modules"就可能要翻过成千上万个条目 —— 手机上几十秒到一分钟，
+     * 而且一旦条目上限先到，还会把好端端的完整包误判成 UNKNOWN 直接拒绝导入。
+     * 体积一条判断就把这条路彻底绕开了。
+     */
+    fun detect(
+        context: Context,
+        uri: Uri,
+        fileName: String? = null,
+        sizeBytes: Long = -1L
+    ): ZipKind {
+        // ① 文件名
         if (fileName != null && guessKindByName(fileName) == ZipKind.UPDATE) {
             return ZipKind.UPDATE
         }
 
+        // ② 体积
+        val size = if (sizeBytes > 0) sizeBytes else queryMeta(context, uri).second
+        if (size >= BIG_PACK_BYTES) return ZipKind.FULL
+
+        // ③ 小包才扫
         var hasUpdateJson = false
         var realNodeModules = 0
         var entries = 0
-        var bytes = 0L
+        val deadline = System.currentTimeMillis() + SCAN_TIME_BUDGET_MS
         try {
             context.contentResolver.openInputStream(uri)?.use { ins ->
                 ZipInputStream(ins.buffered()).use { zis ->
@@ -102,10 +166,13 @@ object PackUpdater {
                             if (n.contains("node_modules/") && !n.endsWith(".package-lock.json")) {
                                 realNodeModules++
                             }
-                            if (e.size > 0) bytes += e.size
                         }
                         if (hasUpdateJson || realNodeModules >= 20) break
-                        if (entries >= MAX_SCAN_ENTRIES || bytes >= MAX_SCAN_BYTES) break
+                        if (entries >= MAX_SCAN_ENTRIES) break
+                        if (System.currentTimeMillis() > deadline) {
+                            FileLogger.log("探测包类型超时，已扫 $entries 个条目")
+                            break
+                        }
                         zis.closeEntry()
                         e = zis.nextEntry
                     }
