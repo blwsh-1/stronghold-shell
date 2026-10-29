@@ -48,8 +48,12 @@ import java.util.zip.ZipInputStream
  *
  * ============================================================================
  * 【安全顺序】任何一步失败都能回到原样
- *   解压 → 剥包裹 → 校验 from → rename 备份 → 逐文件覆盖 → 按 removed 删
- *   → 校验 sha256 → 目录改名 v<新版本> → 写索引；失败全部回滚
+ *   解压 → 剥包裹 → 校验 from → 原地覆盖（旧文件先移进备份区）→ 按 removed 删
+ *   → 校验 sha256 → 目录改名 v<新版本> → 写索引
+ *
+ *   注意「原地覆盖」这四个字：增量包只含变化的文件（0.3.3 只有 21 个），
+ *   其余四万多个文件必须原样保留。只备份「被覆盖 / 被删除」的那几十个文件，
+ *   失败时精确回滚，不碰其余文件。
  */
 object PackUpdater {
 
@@ -309,13 +313,20 @@ object PackUpdater {
         val fromVer = PackManager.readVersionFrom(target)
 
         val stage = File(root, ".overlay")
-        val backup = File(root, "$activeId.bak")
+        val backup = File(root, ".overlay-bak")
         var workDir: File = target
         var renamedTo: File? = null
+
+        // 失败回滚用：
+        //   written  —— 本次新写进去的相对路径（原本不存在的，回滚时删掉）
+        //   backedUp —— 被移进备份区的原文件相对路径（回滚时放回去）
+        val written = LinkedHashSet<String>()
+        val backedUp = LinkedHashSet<String>()
 
         try {
             // ---- 1) 解压 ----
             stage.deleteRecursively()
+            backup.deleteRecursively()
             stage.mkdirs()
             onStage("正在解压增量包…")
             extract(stage)
@@ -338,15 +349,16 @@ object PackUpdater {
                 ?: PackManager.readVersionFrom(base)
                 ?: fromVer
 
-            // ---- 4) 备份 ----
-            onStage("正在备份旧版本…")
-            backup.deleteRecursively()
-            if (!target.renameTo(backup)) {
-                return Result(false, fromVer, null, "无法备份旧版本（目录被占用或存储异常），已中止")
-            }
-            workDir.mkdirs()
-
-            // ---- 5) 逐文件覆盖（跳过 workshop/ var/）----
+            // ---- 4) 原地覆盖 ----
+            // ⚠️ 这里**绝对不能**把整个目录 rename 走再 mkdirs 一个空目录：
+            //    增量包里只有「变化的文件」（0.3.3 只有 21 个，完整包是 41212 个），
+            //    其余文件必须原样留在原地。桌面版 updater.cjs 就是 copyFileSync 原地覆盖
+            //    （updater.cjs:228），从不删任何旧文件。
+            //    之前那版写法会把旧目录整个挪进备份、再建空目录只写 21 个文件，
+            //    结果 3.1→3.2 因为补丁里恰好带 server/index.js 而「假成功」，
+            //    3.2→3.3 补丁里没有 server/index.js，立刻被入口检查拦下。
+            //
+            //    为了失败可回滚，只把「即将被覆盖」的那几个文件先移进备份区（同分区 rename，秒级）。
             onStage("正在覆盖文件…")
             var moved = 0
             var copied = 0
@@ -359,23 +371,38 @@ object PackUpdater {
                     } else {
                         val dest = File(workDir, rel)
                         dest.parentFile?.mkdirs()
-                        if (dest.exists()) dest.delete()
+                        if (dest.isFile) {
+                            // 旧文件先移进备份区，回滚时再移回来
+                            val bk = File(backup, rel)
+                            bk.parentFile?.mkdirs()
+                            if (!dest.renameTo(bk)) {
+                                throw IllegalStateException("备份 $rel 失败（文件被占用？），已中止")
+                            }
+                            backedUp.add(rel)
+                        }
                         if (f.renameTo(dest)) {
                             moved++
                         } else {
                             f.inputStream().use { i -> dest.outputStream().use { o -> i.copyTo(o) } }
                             copied++
                         }
+                        written.add(rel)
                     }
                 }
             }
             if (skipped > 0) FileLogger.log("覆盖时跳过 $skipped 个 mod/状态目录内的文件")
 
-            // ---- 6) 按 removed 清单删旧文件（带哈希校验，不误删用户改过的文件）----
+            // ---- 5) 按 removed 清单删旧文件（带哈希校验，不误删用户改过的文件）----
             if (meta != null && meta.removed.isNotEmpty()) {
                 var del = 0
                 var keep = 0
+                var prot = 0
                 for (r in meta.removed) {
+                    // 与覆盖同样保护 mod / mod 状态目录
+                    if (PROTECTED_PREFIXES.any { r.path.startsWith(it) }) {
+                        prot++
+                        continue
+                    }
                     val f = File(workDir, r.path)
                     if (!f.isFile || !f.canonicalPath.startsWith(workDir.canonicalPath)) continue
                     val okToDelete = if (r.sha256.isEmpty()) {
@@ -385,15 +412,27 @@ object PackUpdater {
                         r.sha256.any { it.equals(actual, true) }
                     }
                     if (okToDelete) {
-                        if (f.delete()) del++
+                        // 不直接删，先移进备份区 —— 失败时能原样放回去
+                        val bk = File(backup, r.path)
+                        bk.parentFile?.mkdirs()
+                        if (f.renameTo(bk)) {
+                            backedUp.add(r.path)
+                            del++
+                        } else if (f.delete()) {
+                            del++
+                        }
                     } else {
                         keep++
                     }
                 }
-                FileLogger.log("按清单删除 $del 个旧文件" + if (keep > 0) "，$keep 个哈希不符已保留" else "")
+                FileLogger.log(
+                    "按清单删除 $del 个旧文件" +
+                        (if (keep > 0) "，$keep 个哈希不符已保留" else "") +
+                        (if (prot > 0) "，$prot 个在受保护目录已跳过" else "")
+                )
             }
 
-            // ---- 7) 校验 ----
+            // ---- 6) 校验 ----
             onStage("正在校验文件…")
             if (meta != null && meta.files.isNotEmpty()) {
                 val bad = ArrayList<String>()
@@ -421,12 +460,12 @@ object PackUpdater {
                 throw IllegalStateException("覆盖后 node_modules 丢了")
             }
 
-            // ---- 8) 版本号对齐（照抄桌面版：localPkg.version = remoteVersion）----
+            // ---- 7) 版本号对齐（照抄桌面版：localPkg.version = remoteVersion）----
             if (!toVer.isNullOrBlank()) forceVersion(workDir, toVer)
             val finalVer = PackManager.readVersionFrom(workDir) ?: toVer
                 ?: throw IllegalStateException("覆盖后读不到版本号")
 
-            // ---- 9) 目录名跟着版本走 + 写索引 ----
+            // ---- 8) 目录名跟着版本走 + 写索引 ----
             val newId = PackManager.safeId("v$finalVer")
             if (newId != activeId) {
                 val finalDir = File(root, newId)
@@ -446,15 +485,36 @@ object PackUpdater {
             )
             return Result(true, fromVer, finalVer, "已升级到 v$finalVer")
         } catch (e: Exception) {
+            // 回滚：把「本次写进去的」删掉，把「移进备份区的」放回去。
+            // 因为只动了补丁涉及的那几十个文件，其余 4 万多个文件全程没被碰过，
+            // 所以这里不需要（也不应该）整目录删除重建。
             try {
-                renamedTo?.deleteRecursively()
-                if (workDir != target) workDir.deleteRecursively()
-                target.deleteRecursively()
-                if (backup.isDirectory) backup.renameTo(target)
+                // 目录若已改名成 v<新版本>，先改回原 id，再往里恢复文件
+                if (renamedTo != null && !target.exists()) {
+                    if (renamedTo!!.renameTo(target)) {
+                        workDir = target
+                        renamedTo = null
+                    }
+                }
+                // 1) 删掉本次新写入、且原本不存在的文件
+                for (rel in written) {
+                    if (rel in backedUp) continue
+                    File(workDir, rel).delete()
+                }
+                // 2) 把备份区的原文件放回原位
+                for (rel in backedUp) {
+                    val bk = File(backup, rel)
+                    if (!bk.isFile) continue
+                    val d = File(workDir, rel)
+                    d.parentFile?.mkdirs()
+                    d.delete()
+                    bk.renameTo(d)
+                }
             } catch (re: Exception) {
                 Log.e(TAG, "回滚失败", re)
             }
             stage.deleteRecursively()
+            backup.deleteRecursively()
             FileLogger.log("增量覆盖失败：" + (e.message ?: "未知错误"))
             return Result(false, fromVer, null, e.message ?: "未知错误")
         }
