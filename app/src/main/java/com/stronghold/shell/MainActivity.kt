@@ -452,6 +452,13 @@ class MainActivity : AppCompatActivity() {
      */
     private fun pollHealthAndLoad() {
         showLoadingPage()
+        
+        // 🌟 [修复补丁1]：防止 Activity 销毁或线程池关闭后，依然有闹钟叫醒它导致闪退
+        if (isFinishing || isDestroyed || io.isShutdown) {
+            Log.w(TAG, "Activity 已销毁或线程池已关闭，取消本次健康检查")
+            return
+        }
+
         io.execute {
             var ok = false
             val maxTries = 180          // 180 × 500ms = 90 秒
@@ -561,13 +568,16 @@ class MainActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        // 🌟 [修复补丁2]：防止线程池关闭后，重新回到前台时再次闪退
+        if (isFinishing || isDestroyed || io.isShutdown) return
+        
         // 自愈：回到前台时若服务健康但页面没加载好，则重新导航
         io.execute {
             if (isServerHealthy()) mainHandler.post { loadGame() }
         }
     }
 
-        /**
+    /**
      * 返回键：退出游戏页，回到启动器（而不是直接退出整个 App）。
      * Node 服务是前台服务，会继续在后台跑，再次点「启动游戏」可秒回。
      */
@@ -578,6 +588,10 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         try { unregisterReceiver(serverReceiver) } catch (_: Exception) {}
+        
+        // 🌟 [修复补丁3]：清空主线程中所有还没执行的延迟任务（比如那个3秒重试），防止诈尸闪退
+        mainHandler.removeCallbacksAndMessages(null)
+        
         io.shutdown()
         super.onDestroy()
     }
