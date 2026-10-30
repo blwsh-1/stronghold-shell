@@ -193,10 +193,14 @@ class MainActivity : AppCompatActivity() {
         if (serverAddress != null) {
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
         }
-        // 联机模式下必须绕开缓存：否则 index.html 可能直接来自缓存，
-        // shouldInterceptRequest 不触发 → hook 注不进去（这是联机失效的头号原因）
-        settings.cacheMode = if (serverAddress != null) WebSettings.LOAD_NO_CACHE
-                             else WebSettings.LOAD_DEFAULT
+        // 缓存策略：默认走 WebView 自己的缓存。
+        // 入口页靠 loadGame 里的随机查询串（?v=…）保证每次都是新 URL，
+        // 所以 shouldInterceptRequest 一定会被调用，补丁不会因为命中缓存而丢失。
+        // 之前联机模式用 LOAD_NO_CACHE，等于每张立绘/头像都重新从 Node 取一遍，
+        // 在兼容层这种本来就慢的环境里会明显拖慢出图。
+        settings.cacheMode = WebSettings.LOAD_DEFAULT
+        // 有些兼容层/省流模式会关掉自动加载图片，显式打开
+        settings.loadsImagesAutomatically = true
         settings.useWideViewPort = true
         settings.loadWithOverviewMode = true
 
@@ -211,8 +215,8 @@ class MainActivity : AppCompatActivity() {
                 view: WebView,
                 request: WebResourceRequest
             ): WebResourceResponse? {
-                // 1) 联机模式下拦截入口页面，把 WebSocket hook 插到 <head> 最前面
-                if (serverAddress != null && isIndexRequest(request.url)) {
+                // 1) 拦截入口页面，把启动补丁（+ 联机 hook）插到 <head> 最前面
+                if (isIndexRequest(request.url)) {
                     injectIntoIndex(request.url)?.let { return it }
                 }
                 // 2) 其余交给 assetLoader（game.local 等自定义域名）
@@ -302,20 +306,23 @@ class MainActivity : AppCompatActivity() {
     }
 
     /**
-     * 从本机 Node 取回 index.html，把 WebSocket hook 插到 <head> 之后返回。
+     * 从本机 Node 取回 index.html，把启动补丁插到 <head> 之后返回。
+     *
+     * 始终注入的是 [UiPatch]（隐藏盟约条两端的滚动箭头与底部滚动条）；
+     * 只有联机模式才追加 [WsHook]。
      *
      * 为什么不用 onPageStarted：那是异步投递的，页面里的内联脚本可能先跑，
      * 导致上游在 hook 生效前就把 WebSocket 取了引用。在 HTML 里插入 <script>
-     * 能保证 hook 严格先于页面上任何脚本执行。
+     * 能保证补丁严格先于页面上任何脚本执行。
      *
-     * 任何异常都返回 null → 退回原生加载，最坏情况是联机不生效但游戏能开。
+     * 任何异常都返回 null → 退回原生加载，最坏情况是补丁没生效但游戏能开。
      */
     private fun injectIntoIndex(url: android.net.Uri): WebResourceResponse? {
-        val addr = serverAddress ?: return null
+        val addr = serverAddress
         val key = url.toString()
         if (!hookedUrls.add(key)) {
             // 已经注入过（页面刷新/重进），仍要注入，只是记一笔日志
-            Log.i(TAG, "重复注入 hook: $key")
+            Log.i(TAG, "重复注入: $key")
         }
         return try {
             val conn = URL(url.toString()).openConnection() as HttpURLConnection
@@ -331,13 +338,20 @@ class MainActivity : AppCompatActivity() {
             val html = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
             conn.disconnect()
 
-            val script = "<script>" + WsHook.build(addr, serverTls) + "</script>"
+            // 启动补丁，两部分：
+            //   UiPatch —— 隐藏盟约条两端的滚动箭头与底部滚动条
+            //   WsHook  —— 联机模式下改写 WebSocket 目标
+            val script = StringBuilder("<script>")
+                .append(UiPatch.build())
+                .apply { if (addr != null) append(WsHook.build(addr, serverTls)) }
+                .append("</script>")
+                .toString()
             val patched = insertIntoHead(html, script)
             if (patched == null) {
-                Log.w(TAG, "index.html 里找不到 <head>，改用 onPageStarted 兜底")
+                Log.w(TAG, "index.html 里找不到 <head>，补丁未注入")
                 return null
             }
-            Log.i(TAG, "已注入 WebSocket hook -> $addr")
+            Log.i(TAG, "已注入启动补丁${if (addr != null) " + WebSocket hook -> $addr" else ""}")
             WebResourceResponse(
                 "text/html",
                 "UTF-8",
@@ -657,9 +671,11 @@ class MainActivity : AppCompatActivity() {
         lastLoadFailed = false
         // 重新加载 = 旧页面的 WebSocket 全部作废，清掉记账避免残留 id 把「已断开」压住
         openSockets.clear()
-        // 联机模式下加一个查询串，确保 URL 唯一、绕开 WebView 缓存，
-        // 保证 shouldInterceptRequest 一定被调用（否则 hook 注不进去）
-        val suffix = if (serverAddress != null) "?multiplayer=1" else ""
+        // 每次加载都带一个随机查询串：URL 唯一 → 一定绕开 WebView 缓存，
+        // 保证 shouldInterceptRequest 被调用，启动补丁不会因为命中缓存而丢失。
+        // 联机模式额外带 multiplayer=1，游戏据此打开多人入口。
+        val nonce = System.currentTimeMillis().toString(36)
+        val suffix = if (serverAddress != null) "?multiplayer=1&v=$nonce" else "?v=$nonce"
         Log.i(TAG, "加载游戏页面: $LOCAL_URL/index.html$suffix")
         webView.loadUrl("$LOCAL_URL/index.html$suffix")
     }
