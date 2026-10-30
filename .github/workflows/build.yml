@@ -164,6 +164,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: launcher-v${{ steps.ver.outputs.version }}
+          # ⚠️ 不写这一行，tag 会落在仓库默认分支（main）的最新提交上，
+          #    而不是这次实际构建的分支 —— 表现就是 Release 页的源码链接
+          #    指向 main 的老代码。github.sha 是本次检出到的那个提交。
+          target_commitish: ${{ github.sha }}
           name: 卫戍协议启动器 v${{ steps.ver.outputs.version }}
           body: |
             **《卫戍协议：盟约》安卓启动器** —— 不含游戏内容的空壳，导入上游完整包即可游玩。
