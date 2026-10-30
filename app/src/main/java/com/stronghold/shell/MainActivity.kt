@@ -14,6 +14,7 @@ import android.util.Log
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
@@ -52,6 +53,24 @@ class MainActivity : AppCompatActivity() {
 
     /** 联机自检是否已执行过（onPageFinished 会多次触发，只弹一次提示） */
     private var hookCheckDone = false
+
+    /**
+     * 主框架加载失败后的自动重试次数。
+     *
+     * 为什么需要：Node 线程刚起来时端口还没监听，而 NodeRunner 会先发「已就绪」广播，
+     * 于是 WebView 可能抢在端口就绪之前请求 index.html，拿到 ERR_CONNECTION_REFUSED。
+     * 此时页面里只剩 WebView 自带的黑底错误页（表现为"黑屏"），必须回到加载页重试。
+     */
+    private var loadRetries = 0
+    private val maxLoadRetries = 5
+
+    /** 是否已有健康检查线程在跑（防止重试时叠加多个轮询） */
+    @Volatile
+    private var polling = false
+
+    /** 最近一次导航是否以错误页告终（用于 onResume 自愈时判断要不要重新导航） */
+    @Volatile
+    private var lastLoadFailed = false
 
     companion object {
         private const val TAG = "StrongholdShell"
@@ -171,10 +190,41 @@ class MainActivity : AppCompatActivity() {
             }
             override fun onPageFinished(view: WebView?, url: String?) {
                 super.onPageFinished(view, url)
+                // 页面正常加载完成 → 重置重试计数
+                if (url?.startsWith(LOCAL_URL) == true) loadRetries = 0
                 // 联机自检：页面加载完立刻问一句 hook 在不在
                 if (serverAddress != null) {
                     mainHandler.postDelayed({ runHookSelfCheck() }, 800)
                 }
+            }
+
+            /**
+             * 主框架加载失败（典型：Node 端口还没起来 → ERR_CONNECTION_REFUSED）。
+             *
+             * 不把 WebView 自带的黑底错误页留给用户，而是退回「正在启动游戏…」
+             * 加载页，并在短暂延时后重新轮询健康检查 → 重新加载。
+             */
+            override fun onReceivedError(
+                view: WebView?,
+                request: WebResourceRequest?,
+                error: WebResourceError?
+            ) {
+                super.onReceivedError(view, request, error)
+                val isMain = request?.isForMainFrame ?: false
+                val url = request?.url?.toString() ?: return
+                Log.w(TAG, "页面加载失败: $url -> ${error?.errorCode} ${error?.description}")
+                if (!isMain || !url.startsWith(LOCAL_URL)) return
+                lastLoadFailed = true
+                if (loadRetries >= maxLoadRetries) {
+                    Log.e(TAG, "重试 $loadRetries 次仍失败，保留错误页")
+                    return
+                }
+                loadRetries++
+                mainHandler.postDelayed({
+                    if (isFinishing || isDestroyed) return@postDelayed
+                    showLoadingPage()
+                    pollHealthAndLoad()
+                }, 600)
             }
         }
 
@@ -452,12 +502,18 @@ class MainActivity : AppCompatActivity() {
      */
     private fun pollHealthAndLoad() {
         showLoadingPage()
-        
+
         // 🌟 [修复补丁1]：防止 Activity 销毁或线程池关闭后，依然有闹钟叫醒它导致闪退
         if (isFinishing || isDestroyed || io.isShutdown) {
             Log.w(TAG, "Activity 已销毁或线程池已关闭，取消本次健康检查")
             return
         }
+        // 避免重试时叠加多个轮询线程
+        if (polling) {
+            Log.i(TAG, "已有健康检查在跑，跳过本次")
+            return
+        }
+        polling = true
 
         io.execute {
             var ok = false
@@ -470,8 +526,9 @@ class MainActivity : AppCompatActivity() {
                 }
                 Thread.sleep(500)
             }
+            polling = false
             Log.i(TAG, "健康检查结果: $ok")
-            if (ok) mainHandler.post { loadGame() }
+            if (ok) mainHandler.post { loadGame(force = true) }
             else mainHandler.post { showErrorAndRetry() }
         }
     }
@@ -528,8 +585,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun loadGame() {
-        if (webView.url?.startsWith(LOCAL_URL) == true) return
+    /**
+     * 加载游戏页面。
+     *
+     * @param force true 时忽略「已经在 LOCAL_URL 上」的判断，强制重新加载。
+     *        健康检查成功后必须用 force=true：首次加载可能因为 Node 端口还没监听
+     *        而失败，此时 webView.url 已经是 LOCAL_URL，不加 force 就永远不会重试，
+     *        用户看到的就是 WebView 的黑底错误页（"黑屏"）。
+     */
+    private fun loadGame(force: Boolean = false) {
+        if (!force && webView.url?.startsWith(LOCAL_URL) == true) return
+        lastLoadFailed = false
         // 联机模式下加一个查询串，确保 URL 唯一、绕开 WebView 缓存，
         // 保证 shouldInterceptRequest 一定被调用（否则 hook 注不进去）
         val suffix = if (serverAddress != null) "?multiplayer=1" else ""
@@ -571,9 +637,11 @@ class MainActivity : AppCompatActivity() {
         // 🌟 [修复补丁2]：防止线程池关闭后，重新回到前台时再次闪退
         if (isFinishing || isDestroyed || io.isShutdown) return
         
-        // 自愈：回到前台时若服务健康但页面没加载好，则重新导航
+        // 自愈：回到前台时若服务健康但上一次导航是错误页，则强制重新导航。
+        // 注意不能无条件 loadGame()：url 已经是 LOCAL_URL 时会被守卫拦下，
+        // 且无条件强刷会在每次切回前台时重载游戏、丢掉进度。
         io.execute {
-            if (isServerHealthy()) mainHandler.post { loadGame() }
+            if (isServerHealthy() && lastLoadFailed) mainHandler.post { loadGame(force = true) }
         }
     }
 
@@ -583,6 +651,7 @@ class MainActivity : AppCompatActivity() {
      */
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        super.onBackPressed()
         finish()
     }
 
